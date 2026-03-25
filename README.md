@@ -103,6 +103,60 @@ npm install
 npm run dev
 ```
 
+## Seed Demo Data
+
+Populate deterministic instructor/student accounts and baseline scenario/challenge records:
+
+```bash
+cd reactiverange/backend
+python seed_data.py
+```
+
+Seeded credentials:
+
+- Instructor: `instructor@reactiverange.local` / `DemoPass123!`
+- Student: `student@reactiverange.local` / `DemoPass123!`
+
+## End-to-End Smoke Test
+
+After backend is running and seed data is loaded, run:
+
+```bash
+cd reactiverange/backend
+python smoke_test.py
+```
+
+Optional overrides:
+
+```bash
+python smoke_test.py --base-url http://127.0.0.1:5000 --email instructor@reactiverange.local --password DemoPass123!
+```
+
+What smoke test validates:
+
+- Health endpoint readiness
+- OTP two-step login (`/api/auth/login` + `/api/auth/verify-otp`)
+- Scenario listing
+- Challenge start
+- Adaptive MTD trigger + challenge status
+- Live scoreboard + history
+- Challenge stop
+
+## One-Shot Demo Runner
+
+Run a complete local demo in one command (seed + backend start + smoke test + backend stop):
+
+```bash
+cd reactiverange/backend
+python run_demo.py
+```
+
+Optional flags:
+
+```bash
+python run_demo.py --skip-seed --base-url http://127.0.0.1:5000 --email instructor@reactiverange.local --password DemoPass123!
+```
+
 ## Key API Endpoints
 
 Auth:
@@ -139,3 +193,4 @@ Score and events:
 - OTP expiry is 5 minutes and resend cooldown is 60 seconds.
 - Adaptive MTD policy lives in `reactiverange/backend/services/mtd_engine.py` and uses weighted state-based action selection instead of pure random hopping.
 - Docker operations gracefully degrade to simulated mode if Docker daemon is unavailable.
+- Scenario generation now gracefully falls back to a local template if Gemini credentials are invalid, quota/rate limits are exceeded, or the configured model is unavailable for your API version.

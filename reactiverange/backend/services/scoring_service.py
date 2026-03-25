@@ -21,8 +21,25 @@ class ScoringService:
     ):
         score = Score.query.filter_by(user_id=user_id, challenge_id=challenge_id).first()
         if not score:
-            score = Score(user_id=user_id, challenge_id=challenge_id)
+            score = Score(
+                user_id=user_id,
+                challenge_id=challenge_id,
+                base_score=0.0,
+                speed_multiplier=1.0,
+                deception_penalty=0.0,
+                net_score=0.0,
+                solved=0,
+                deception_hits=0,
+                mtd_evasions=0,
+            )
             db.session.add(score)
+
+        score.base_score = float(score.base_score or 0.0)
+        score.speed_multiplier = float(score.speed_multiplier or 1.0)
+        score.deception_penalty = float(score.deception_penalty or 0.0)
+        score.solved = int(score.solved or 0)
+        score.deception_hits = int(score.deception_hits or 0)
+        score.mtd_evasions = int(score.mtd_evasions or 0)
 
         score.base_score += base_delta
         if speed_multiplier is not None:

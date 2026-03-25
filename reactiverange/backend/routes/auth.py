@@ -73,12 +73,21 @@ def login():
     db.session.commit()
 
     mail_service = current_app.extensions["mail_service"]
+    mail_warning = None
     try:
         mail_service.send_otp_email(user.email, otp)
     except Exception as exc:
-        return jsonify({"error": f"Failed to send OTP: {exc}"}), 500
+        mail_warning = f"OTP generated but email delivery failed: {exc}"
 
-    return jsonify({"requires_otp": True, "user_id": user.id}), 200
+    # 👇 🚨 แทรก 3 บรรทัดนี้เพิ่มเข้าไปตรงนี้เลยครับ! 🚨 👇 เทสเท่านั้นอย่าลืมปิด
+    print("=====================================")
+    print(f"🔑 DEMO LOGIN OTP: {otp}")
+    print("=====================================")
+
+    response = {"requires_otp": True, "user_id": user.id}
+    if mail_warning:
+        response["mail_warning"] = mail_warning
+    return jsonify(response), 200
 
 
 @auth_bp.post("/verify-otp")

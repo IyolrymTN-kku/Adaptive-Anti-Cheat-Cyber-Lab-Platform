@@ -25,7 +25,10 @@ def generate_scenario():
         return jsonify({"error": "Invalid difficulty"}), 400
 
     gemini_service = current_app.extensions["gemini_service"]
-    payload = gemini_service.generate_scenario(vuln_type, difficulty, custom_description)
+    try:
+        payload = gemini_service.generate_scenario(vuln_type, difficulty, custom_description)
+    except Exception as exc:
+        return jsonify({"error": f"Scenario generation failed: {exc}"}), 502
 
     scenario = Scenario(
         name=f"{vuln_type.replace('_', ' ').title()} ({difficulty.title()})",

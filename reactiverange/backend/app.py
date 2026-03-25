@@ -18,12 +18,12 @@ from services.mail_service import MailService
 
 mail = Mail()
 login_manager = LoginManager()
-socketio = SocketIO(cors_allowed_origins="*")
+socketio = SocketIO(cors_allowed_origins="*", async_mode="threading")
 
 
 @login_manager.user_loader
 def load_user(user_id):
-    return User.query.get(int(user_id))
+    return db.session.get(User, int(user_id))
 
 
 @login_manager.request_loader
@@ -44,7 +44,7 @@ def load_user_from_request(request):
     user_id = payload.get("sub")
     if not user_id:
         return None
-    return User.query.get(int(user_id))
+    return db.session.get(User, int(user_id))
 
 
 def create_app():
