@@ -11,6 +11,8 @@ from docker.errors import DockerException
 from models import Challenge, Event, Scenario, db
 from services.mtd_engine import AdaptiveMTDEngine
 
+from datetime import datetime, timedelta
+
 
 class DockerService:
     def __init__(self, socketio=None, app=None):
@@ -22,6 +24,8 @@ class DockerService:
             self.client = docker.from_env()
         except DockerException:
             self.client = None
+
+        self._start_reaper()
 
     def _emit(self, event_type, payload):
         if self.socketio:
@@ -251,3 +255,32 @@ class DockerService:
             .limit(limit)
             .all()
         )
+
+    def _start_reaper(self):
+        def reaper_worker():
+            while True:
+                time.sleep(60)  # ตื่นมาตรวจทุกๆ 1 นาที
+                if not self.app:
+                    continue
+                    
+                with self.app.app_context():
+                    # กำหนดเวลาหมดอายุ (15 นาที)
+                    cutoff_time = datetime.utcnow() - timedelta(minutes=15)
+                    
+                    # ค้นหาโจทย์ที่ Active และเวลาเริ่มเก่ากว่า 15 นาที
+                    expired_challenges = Challenge.query.filter(
+                        Challenge.status == "active",
+                        Challenge.started_at <= cutoff_time
+                    ).all()
+                    
+                    for c in expired_challenges:
+                        try:
+                            # สั่ง Terminate คอนเทนเนอร์ที่หมดอายุ
+                            self.stop_challenge(c.id)
+                            print(f"[AUTO-TERMINATE] 💀 Killed expired Challenge ID: {c.id} (Exceeded 15 mins)")
+                        except Exception as e:
+                            print(f"[AUTO-TERMINATE] Error killing Challenge {c.id}: {e}")
+
+        # สั่งรันแบบ Background Thread (ถ้าระบบหลักปิด ยมทูตก็จะตายตามไปด้วย)
+        reaper_thread = threading.Thread(target=reaper_worker, daemon=True)
+        reaper_thread.start()
