@@ -22,7 +22,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./backend/instance/reactiverange.db:/app/reactiverange.db
+      # - ./backend/instance/reactiverange.db:/app/reactiverange.db
+      - ./backend:/data
     environment:
-      - SQLITE_DATABASE=reactiverange.db
+      # - SQLITE_DATABASE=reactiverange.db
+      - SQLITE_DATABASE=instance/reactiverange.db
     restart: always
