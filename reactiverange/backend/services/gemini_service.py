@@ -141,7 +141,7 @@ class GeminiService:
                 "FROM python:3.11-slim\n"
                 "WORKDIR /app\n"
                 "RUN pip install flask\n"
-                "COPY . .\n"
+                "RUN echo 'from flask import Flask\\napp = Flask(__name__)\\n@app.route(\"/\")\\ndef index():\\n    return \"Target System Active!\"\\nif __name__ == \"__main__\":\\n    app.run(host=\"0.0.0.0\", port=5000)' > app.py\n"
                 "EXPOSE 5000\n"
                 "CMD [\"python\", \"app.py\"]\n"
             ),
@@ -184,7 +184,7 @@ class GeminiService:
         prompt = (
             f"Generate a CTF challenge for {vuln_type} at {difficulty} level. "
             "Return ONLY valid JSON with keys: "
-            "dockerfile_content (string, complete Dockerfile for vulnerable Flask/PHP app), "
+            "dockerfile_content (string, complete Dockerfile. IMPORTANT: Do NOT use 'COPY . .'. You MUST write the vulnerable python/php code entirely inline using 'RUN echo \"...code...\" > app.py' inside the Dockerfile), "
             "rule_json (array of regex patterns that match attack payloads), "
             "challenge_description (string, shown to student), "
             "expected_solution_path (string, instructor-only hint), "

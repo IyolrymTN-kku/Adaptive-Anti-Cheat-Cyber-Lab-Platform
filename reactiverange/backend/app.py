@@ -64,7 +64,7 @@ def create_app():
 
         app.extensions["mail_service"] = MailService(mail)
         app.extensions["gemini_service"] = GeminiService(app.config["GEMINI_API_KEY"])
-        app.extensions["docker_service"] = DockerService(socketio=socketio)
+        app.extensions["docker_service"] = DockerService(socketio=socketio, app=app)
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(challenge_bp)
@@ -85,4 +85,4 @@ app = create_app()
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     print(f"🚀 ReactiveRange Backend is running on http://127.0.0.1:{port}")
-    socketio.run(app, host="0.0.0.0", port=port)
+    socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)

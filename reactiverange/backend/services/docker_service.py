@@ -1,5 +1,6 @@
 import io
 import random
+import tarfile
 import threading
 import time
 from datetime import datetime
@@ -12,8 +13,9 @@ from services.mtd_engine import AdaptiveMTDEngine
 
 
 class DockerService:
-    def __init__(self, socketio=None):
+    def __init__(self, socketio=None, app=None):
         self.socketio = socketio
+        self.app = app
         self.engines = {}
         self.client = None
         try:
@@ -36,13 +38,36 @@ class DockerService:
         if not self.client:
             return None
 
-        dockerfile = scenario.dockerfile_content.encode("utf-8")
+        dockerfile_bytes = scenario.dockerfile_content.encode("utf-8")
         image_tag = f"reactiverange/scenario-{scenario.id}:latest"
-        fileobj = io.BytesIO(dockerfile)
+        
+        # Create a tar archive with the Dockerfile
+        tar_buffer = io.BytesIO()
+        tar = tarfile.open(fileobj=tar_buffer, mode="w")
+        
+        dockerfile_tarinfo = tarfile.TarInfo(name="Dockerfile")
+        dockerfile_tarinfo.size = len(dockerfile_bytes)
+        tar.addfile(dockerfile_tarinfo, io.BytesIO(dockerfile_bytes))
+
+
+        default_app_code = (
+            "from flask import Flask\n"
+            "app = Flask(__name__)\n"
+            "@app.route('/')\n"
+            "def index(): return 'Cyber Range Target is Active!'\n"
+            "if __name__ == '__main__': app.run(host='0.0.0.0', port=5000)\n"
+        )
+        app_bytes = default_app_code.encode("utf-8")
+        app_tarinfo = tarfile.TarInfo(name="app.py")
+        app_tarinfo.size = len(app_bytes)
+        tar.addfile(app_tarinfo, io.BytesIO(app_bytes))
+        
+        tar.close()
+        
+        tar_buffer.seek(0)
         self.client.images.build(
-            fileobj=fileobj,
+            fileobj=tar_buffer,
             custom_context=True,
-            dockerfile="Dockerfile",
             tag=image_tag,
             rm=True,
             pull=False,
@@ -71,13 +96,27 @@ class DockerService:
                     content = line.decode("utf-8", errors="ignore").strip()
                     if not content:
                         continue
-                    self._record_event(
-                        challenge_id,
-                        "attack_detected" if "attack" in content.lower() else "system_log",
-                        {"log": content},
-                    )
+                    
+                    # Use app context for database operations
+                    if self.app:
+                        with self.app.app_context():
+                            self._record_event(
+                                challenge_id,
+                                "attack_detected" if "attack" in content.lower() else "system_log",
+                                {"log": content},
+                            )
+                    else:
+                        # If no app context, just emit without recording to DB
+                        self._emit(
+                            "attack_detected" if "attack" in content.lower() else "system_log",
+                            {"challenge_id": challenge_id, "log": content},
+                        )
             except Exception as exc:
-                self._record_event(challenge_id, "system_log", {"error": str(exc)})
+                if self.app:
+                    with self.app.app_context():
+                        self._record_event(challenge_id, "system_log", {"error": str(exc)})
+                else:
+                    self._emit("system_log", {"challenge_id": challenge_id, "error": str(exc)})
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
