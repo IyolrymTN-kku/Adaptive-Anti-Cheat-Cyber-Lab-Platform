@@ -16,6 +16,9 @@ export default function ChallengePage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [flagInput, setFlagInput] = useState('');
   const [submitStatus, setSubmitStatus] = useState(null);
+  
+  //  State สำหรับเก็บเวลานับถอยหลัง
+  const [timeLeft, setTimeLeft] = useState('15:00');
 
   const loadData = async () => {
     setStatusLoading(true);
@@ -24,7 +27,6 @@ export default function ChallengePage() {
       const { data: statusData } = await apiClient.get('/api/challenge/status');
       
       if (Array.isArray(statusData)) {
-        // หาข้อที่กำลัง Active อยู่
         const own = statusData.find((row) => row.team_id === user?.id && row.status === 'active');
         setChallenge(own || null);
 
@@ -51,6 +53,43 @@ export default function ChallengePage() {
     loadData();
   }, [user]);
 
+  //  --- ระบบ Countdown Timer 15 นาที --- 
+  useEffect(() => {
+    if (!challenge || challenge.status !== 'active') {
+      setTimeLeft('15:00');
+      return;
+    }
+
+    // คำนวณเวลาหมดอายุ (15 นาทีจากตอนเริ่ม)
+    let endTime;
+    if (challenge.started_at) {
+      // แปลงเวลาจาก Backend ให้เป็น UTC มาตรฐาน
+      const timeStr = challenge.started_at.endsWith('Z') ? challenge.started_at : challenge.started_at + 'Z';
+      endTime = new Date(timeStr).getTime() + 15 * 60 * 1000;
+    } else {
+      // Fallback เผื่อ Backend ไม่ได้ส่งเวลามา
+      endTime = new Date().getTime() + 15 * 60 * 1000;
+    }
+
+    const timer = setInterval(() => {
+      const now = new Date().getTime();
+      const distance = endTime - now;
+
+      if (distance <= 0) {
+        clearInterval(timer);
+        setTimeLeft('00:00');
+        // เมื่อเวลาหมด สามารถสั่ง loadData() รีเฟรชโจทย์ทิ้งได้เลย (ตัว Backend Reaper จะเคลียร์คอนเทนเนอร์ให้เอง)
+      } else {
+        const m = Math.floor(distance / (1000 * 60));
+        const s = Math.floor((distance % (1000 * 60)) / 1000);
+        setTimeLeft(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [challenge]);
+  // ------------------------------------------
+
   const openModal = (scenario) => {
     setSelectedScenario(scenario);
     setSubmitStatus(null);
@@ -62,7 +101,7 @@ export default function ChallengePage() {
     setIsModalOpen(false);
     setSelectedScenario(null);
     setSubmitStatus(null);
-    loadData(); // อัปเดตข้อมูลเผื่อเพิ่งแก้โจทย์เสร็จ
+    loadData();
   };
 
   const startChallenge = async (scenarioId) => {
@@ -113,7 +152,7 @@ export default function ChallengePage() {
     <div className="mx-auto mt-8 w-full max-w-7xl px-4 animate-fadeIn pb-12">
       <div className="mb-8 flex flex-wrap items-center justify-between border-b border-gray-200 dark:border-slate-700 pb-4">
         <div>
-          <h1 className="font-display text-3xl font-bold text-gray-900 dark:text-white">picoGym <span className="text-green-500">Reactive Range</span></h1>
+          <h1 className="font-display text-3xl font-bold text-gray-900 dark:text-white"><span className="text-green-500">Reactive Range</span></h1>
           <p className="mt-1 text-sm text-gray-500 dark:text-slate-400">Practice your skills in an adaptive, reactive environment.</p>
         </div>
         {challenge && (
@@ -134,7 +173,7 @@ export default function ChallengePage() {
         <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {scenarios.map((s) => {
             const isThisActive = challenge?.scenario_id === s.id;
-            const isSolved = solvedIds.includes(s.id); // 🚨 เช็คว่าแก้ข้อนี้หรือยัง
+            const isSolved = solvedIds.includes(s.id);
 
             return (
               <div 
@@ -196,7 +235,7 @@ export default function ChallengePage() {
               <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
                 {selectedScenario.name}
                 {isCurrentActive && <span className="text-sm font-normal px-2 py-0.5 bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400 rounded border border-green-200 dark:border-green-500/30">RUNNING</span>}
-                {isSolved && !isCurrentActive && <span className="text-sm font-bold px-2 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-600 dark:text-white rounded border border-blue-200 dark:border-blue-500">SOLVED ✅</span>}
+                {isSolved && !isCurrentActive && <span className="text-sm font-bold px-2 py-0.5 bg-blue-100 text-blue-700 dark:bg-blue-600 dark:text-white rounded border border-blue-200 dark:border-blue-500">SOLVED</span>}
               </h2>
               <button onClick={closeModal} className="text-gray-500 hover:text-gray-800 dark:text-slate-400 dark:hover:text-white transition text-xl p-1">✕</button>
             </div>
@@ -220,7 +259,7 @@ export default function ChallengePage() {
                         className="px-8 py-2 rounded-lg font-bold text-white bg-blue-600 hover:bg-blue-500 shadow-lg transition-all"
                       >
                         Back to Challenges
-                      </button> 
+                      </button>
                     </div>
                   ) : !isCurrentActive ? (
                     <div className="bg-gray-50 dark:bg-slate-800/50 border border-gray-200 dark:border-slate-700 rounded-lg p-6 text-center">
@@ -243,10 +282,13 @@ export default function ChallengePage() {
                         <p className="text-sm text-gray-700 dark:text-slate-300 mb-3">
                           The target system is running here: <a href={`http://localhost:${challenge.current_port || challenge.port}`} target="_blank" rel="noreferrer" className="text-green-600 dark:text-green-400 font-mono hover:underline font-bold text-lg block mt-1">http://localhost:{challenge.current_port || challenge.port}</a>
                         </p>
+
+                        {/* UI นาฬิกานับถอยหลังใหม่ตรงนี้! */}
                         <p className="text-xs text-amber-600 dark:text-amber-400/80 mb-4 flex items-center gap-2">
                           <span className="inline-block w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400 animate-pulse"></span>
-                          Instance will auto-terminate after 15 minutes of inactivity.
+                          Instance Time Remaining: <span className="font-mono font-bold text-sm text-amber-500">{timeLeft}</span>
                         </p>
+
                         <div className="pt-2">
                             <button onClick={stopChallenge} className="text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 text-sm font-semibold transition underline">
                               Terminate Instance
