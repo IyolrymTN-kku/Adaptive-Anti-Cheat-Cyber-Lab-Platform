@@ -52,20 +52,7 @@ class DockerService:
         dockerfile_tarinfo = tarfile.TarInfo(name="Dockerfile")
         dockerfile_tarinfo.size = len(dockerfile_bytes)
         tar.addfile(dockerfile_tarinfo, io.BytesIO(dockerfile_bytes))
-
-
-        default_app_code = (
-            "from flask import Flask\n"
-            "app = Flask(__name__)\n"
-            "@app.route('/')\n"
-            "def index(): return 'Cyber Range Target is Active!'\n"
-            "if __name__ == '__main__': app.run(host='0.0.0.0', port=5000)\n"
-        )
-        app_bytes = default_app_code.encode("utf-8")
-        app_tarinfo = tarfile.TarInfo(name="app.py")
-        app_tarinfo.size = len(app_bytes)
-        tar.addfile(app_tarinfo, io.BytesIO(app_bytes))
-        
+  
         tar.close()
         
         tar_buffer.seek(0)
@@ -277,7 +264,7 @@ class DockerService:
                         try:
                             # สั่ง Terminate คอนเทนเนอร์ที่หมดอายุ
                             self.stop_challenge(c.id)
-                            print(f"[AUTO-TERMINATE] 💀 Killed expired Challenge ID: {c.id} (Exceeded 15 mins)")
+                            print(f"[AUTO-TERMINATE] Killed expired Challenge ID: {c.id} (Exceeded 15 mins)")
                         except Exception as e:
                             print(f"[AUTO-TERMINATE] Error killing Challenge {c.id}: {e}")
 

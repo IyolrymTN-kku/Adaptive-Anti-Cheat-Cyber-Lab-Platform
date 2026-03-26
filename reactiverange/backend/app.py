@@ -57,7 +57,7 @@ def create_app():
     mail.init_app(app)
     login_manager.init_app(app)
     socketio.init_app(app)
-    CORS(app, supports_credentials=True)
+    CORS(app, supports_credentials=True, origins=["http://localhost:3000", "http://127.0.0.1:3000"])
 
     with app.app_context():
         db.create_all()

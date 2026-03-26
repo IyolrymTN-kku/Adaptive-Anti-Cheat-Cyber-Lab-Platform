@@ -21,7 +21,6 @@ def start_challenge():
 
     docker_service = current_app.extensions["docker_service"]
 
-    # 🚨 สร้างแค่ของคนที่กด (Instructor) คนเดียวพอ ไม่เปลืองเซิร์ฟเวอร์
     challenge = docker_service.start_challenge(scenario_id, current_user.id)
 
     return (
@@ -53,7 +52,6 @@ def stop_challenge():
     docker_service = current_app.extensions["docker_service"]
     updated = docker_service.stop_challenge(challenge_id)
 
-    # 🚨 Mass Teardown: พออาจารย์สั่งปิดคลาส ให้กวาดล้าง Container ของเด็กทุกคนทิ้งให้เกลี้ยง
     if current_user.role == "instructor":
         active_student_challenges = Challenge.query.filter_by(
             scenario_id=challenge.scenario_id,
@@ -90,26 +88,6 @@ def status_challenge():
             ),
             200,
         )
-
-    # # 🚨 THE MAGIC IS HERE: Just-In-Time (JIT) Provisioning สำหรับนักเรียน
-    # if current_user.role == "student":
-    #     # เช็คว่านักเรียนมีโจทย์รันอยู่หรือยัง
-    #     my_active = Challenge.query.filter_by(team_id=current_user.id, status="active").first()
-    #     if not my_active:
-    #         # ถังยังไม่มี ให้ไปแอบดูว่าตอนนี้มีคลาสของ Instructor คนไหนกำลังเปิดอยู่ไหม
-    #         instructors = User.query.filter_by(role="instructor").all()
-    #         instructor_ids = [i.id for i in instructors]
-            
-    #         if instructor_ids:
-    #             instructor_active = Challenge.query.filter(
-    #                 Challenge.team_id.in_(instructor_ids),
-    #                 Challenge.status == "active"
-    #             ).order_by(Challenge.id.desc()).first()
-
-    #             # ถ้ามีคลาสเปิดอยู่ ระบบจะสั่งปั้น Container ให้นักเรียนคนนี้ทันที! (เสกสดๆ ตอนเปิดหน้าเว็บ)
-    #             if instructor_active:
-    #                 docker_service = current_app.extensions["docker_service"]
-    #                 docker_service.start_challenge(instructor_active.scenario_id, current_user.id)
 
     # คืนค่าโจทย์กลับไปให้ Frontend แสดงผล
     query = Challenge.query
@@ -185,3 +163,71 @@ def trigger_mtd():
     )
 
     return jsonify(decision), 200
+
+@challenge_bp.post("/submit")
+@login_required
+def submit_flag():
+    from models import Event, Score, db
+    from flask import current_app
+    from datetime import datetime
+
+    data = request.get_json(force=True)
+    challenge_id = data.get("challenge_id")
+    submitted_flag = data.get("flag", "").strip()
+
+    challenge = Challenge.query.get(challenge_id)
+    if not challenge:
+        return jsonify({"error": "Challenge not found"}), 404
+
+    scenario = Scenario.query.get(challenge.scenario_id)
+    if not scenario:
+        return jsonify({"error": "Scenario not found"}), 404
+
+    if scenario.flag == submitted_flag:
+        if challenge.status == "solved":
+            return jsonify({"success": True, "message": "You already solved this challenge!"}), 200
+
+        points = 100
+        if scenario.difficulty == 'medium': points = 200
+        if scenario.difficulty == 'hard': points = 300
+
+        # 2. ค้นหาหรือสร้าง Score ใหม่
+        score_entry = Score.query.filter_by(user_id=current_user.id, challenge_id=challenge.id).first()
+        if not score_entry:
+            score_entry = Score(
+                user_id=current_user.id, 
+                challenge_id=challenge.id,
+                base_score=0.0,
+                net_score=0.0,
+                solved=0
+            )
+            db.session.add(score_entry)
+        
+        score_entry.base_score = (score_entry.base_score or 0.0) + points
+        score_entry.net_score = (score_entry.net_score or 0.0) + points
+        score_entry.solved = 1  # อัปเดตว่าโจทย์ข้อนี้ผ่านแล้ว
+        score_entry.last_activity = datetime.utcnow()
+
+        # 3. บันทึก Event
+        solve_event = Event(
+            challenge_id=challenge.id,
+            type="score_update",
+            details={"message": "Flag captured successfully!", "points_added": points}
+        )
+        db.session.add(solve_event)
+        db.session.commit()
+
+        docker_service = current_app.extensions.get("docker_service")
+        if docker_service:
+            try:
+                docker_service._emit("score_update", {"challenge_id": challenge.id, "points": points})
+                docker_service.stop_challenge(challenge.id)
+            except Exception as e:
+                print(f"Cleanup error: {e}")
+
+        challenge.status = "solved"
+        db.session.commit()
+
+        return jsonify({"success": True, "message": f"Correct Flag! +{points} Points!"}), 200
+    else:
+        return jsonify({"success": False, "message": "Incorrect Flag. Keep trying!"}), 200

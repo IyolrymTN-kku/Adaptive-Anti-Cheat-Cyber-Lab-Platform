@@ -106,55 +106,93 @@ class GeminiService:
 
     @staticmethod
     def _build_offline_payload(vuln_type, difficulty, custom_description="", reason=""):
-        rule_map = {
-            "sql_injection": [
-                r"(?i)(\bUNION\b|\bSELECT\b|\bOR\b\s+1=1)",
-                r"(?i)(--|#|/\*)",
-            ],
-            "xss": [
-                r"(?i)<\s*script",
-                r"(?i)onerror\s*=|onload\s*=|javascript:",
-            ],
-            "cmd_injection": [
-                r"(;|&&|\|\|)",
-                r"(?i)(\bcurl\b|\bwget\b|\bcat\b\s+/etc/passwd)",
-            ],
-        }
+        import base64
+        
+        # 1. สร้าง Flag ของจริงเตรียมไว้ให้ขโมย
+        flag_val = f"FLAG{{{vuln_type}_{difficulty}_training_success}}"
+        setup_cmd = ""
 
-        vuln_titles = {
-            "sql_injection": "SQL Injection",
-            "xss": "Cross-Site Scripting (XSS)",
-            "cmd_injection": "Command Injection",
-        }
+        # 2. เขียนโค้ดเว็บที่มีช่องโหว่ของจริงตามหมวดหมู่ (ต้องชิดซ้ายสุด ห้ามมีย่อหน้า!)
+        if vuln_type == "cmd_injection":
+            app_code = f"""from flask import Flask, request
+import subprocess
+app = Flask(__name__)
+@app.route('/')
+def index():
+    return '<h2>Network Ping Tool</h2><form action="/ping"><input name="ip" value="127.0.0.1"><button type="submit">Ping</button></form><p>Hint: Read /flag.txt</p>'
+@app.route('/ping')
+def ping():
+    ip = request.args.get('ip', '')
+    try:
+        out = subprocess.check_output("ping -c 1 " + ip, shell=True, text=True)
+    except Exception as e:
+        out = str(e)
+    return '<pre>' + out + '</pre><br><a href="/">Back</a>'
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)"""
+            setup_cmd = f"RUN echo '{flag_val}' > /flag.txt"
 
-        difficulty_hint = {
-            "easy": "single-step exploit",
-            "medium": "two-step exploit with basic filtering",
-            "hard": "multi-step exploit with noisy defenses",
-        }
+        elif vuln_type == "sql_injection":
+            app_code = f"""from flask import Flask, request
+import sqlite3
+app = Flask(__name__)
+def init_db():
+    conn = sqlite3.connect('test.db')
+    conn.execute('CREATE TABLE IF NOT EXISTS users (username TEXT, password TEXT)')
+    conn.execute("INSERT INTO users VALUES ('admin', 'supersecret_password')")
+    conn.commit()
+    conn.close()
+init_db()
+@app.route('/')
+def index():
+    return '<h2>Admin Portal Login</h2><form action="/login">Username: <input name="user"><br>Password: <input type="password" name="pass"><br><button type="submit">Login</button></form>'
+@app.route('/login')
+def login():
+    u = request.args.get('user', '')
+    p = request.args.get('pass', '')
+    conn = sqlite3.connect('test.db')
+    cur = conn.cursor()
+    query = f"SELECT * FROM users WHERE username='{{u}}' AND password='{{p}}'"
+    try:
+        cur.execute(query)
+        if cur.fetchone():
+            return '<h1>Welcome Admin!</h1><p>Your secret flag is: {flag_val}</p>'
+        else:
+            return 'Invalid credentials. <a href="/">Try again</a>'
+    except Exception as e:
+        return 'SQL Error: ' + str(e)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)"""
 
-        desc_suffix = f" Extra requirement: {custom_description}." if custom_description else ""
-        reason_suffix = f" [Fallback mode: {reason}]" if reason else ""
+        else: # XSS หรืออื่นๆ
+            app_code = f"""from flask import Flask, request
+app = Flask(__name__)
+@app.route('/')
+def index():
+    name = request.args.get('name', 'Guest')
+    return '<h2>Welcome ' + name + '</h2><form action="/"><input name="name" placeholder="Enter your name"><button type="submit">Submit</button></form>'
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)"""
+
+        # แปลงเป็น Base64
+        app_b64 = base64.b64encode(app_code.encode('utf-8')).decode('utf-8')
+
+        dockerfile = (
+            "FROM python:3.11-slim\n"
+            "WORKDIR /app\n"
+            "RUN pip install flask\n"
+            f"{setup_cmd}\n"
+            f"RUN echo '{app_b64}' | base64 -d > app.py\n"
+            "EXPOSE 5000\n"
+            "CMD [\"python\", \"app.py\"]\n"
+        )
 
         return {
-            "dockerfile_content": (
-                "FROM python:3.11-slim\n"
-                "WORKDIR /app\n"
-                "RUN pip install flask\n"
-                "RUN echo 'from flask import Flask\\napp = Flask(__name__)\\n@app.route(\"/\")\\ndef index():\\n    return \"Target System Active!\"\\nif __name__ == \"__main__\":\\n    app.run(host=\"0.0.0.0\", port=5000)' > app.py\n"
-                "EXPOSE 5000\n"
-                "CMD [\"python\", \"app.py\"]\n"
-            ),
-            "rule_json": rule_map.get(vuln_type, [r"(?i)(attack|payload|exploit)"]),
-            "challenge_description": (
-                f"Exploit a {vuln_titles.get(vuln_type, vuln_type)} vulnerability "
-                f"at {difficulty} difficulty ({difficulty_hint.get(difficulty, 'guided exploit')})."
-                f" Retrieve the flag from the vulnerable service.{desc_suffix}{reason_suffix}"
-            ),
-            "expected_solution_path": (
-                f"Craft a {vuln_type} payload, bypass basic checks, and exfiltrate FLAG{{...}} from server response."
-            ),
-            "flag": f"FLAG{{{vuln_type}_{difficulty}_training}}",
+            "dockerfile_content": dockerfile,
+            "rule_json": [r"(?i)(attack|payload|exploit)"],
+            "challenge_description": f"Target deployed. Analyze and exploit the {vuln_type} vulnerability to extract the flag.",
+            "expected_solution_path": "Analyze source, craft payload, exploit vulnerability, submit flag.",
+            "flag": flag_val,
         }
 
     @staticmethod
