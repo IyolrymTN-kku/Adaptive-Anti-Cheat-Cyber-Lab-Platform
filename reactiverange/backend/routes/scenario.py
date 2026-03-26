@@ -67,29 +67,44 @@ def generate_scenario():
 @scenario_bp.get("/list")
 @login_required
 def list_scenarios():
-    query = Scenario.query
-    if current_user.role != "instructor":
-        query = query.filter_by(created_by=current_user.id)
+    # query = Scenario.query
+    # if current_user.role != "instructor":
+    #     query = query.filter_by(created_by=current_user.id)
 
-    rows = query.order_by(Scenario.created_at.desc()).all()
-    return (
-        jsonify(
-            [
-                {
-                    "id": s.id,
-                    "name": s.name,
-                    "difficulty": s.difficulty,
-                    "vuln_type": s.vuln_type,
-                    "challenge_description": s.challenge_description,
-                    "rule_json": s.rule_json,
-                    "created_at": s.created_at.isoformat(),
-                }
-                for s in rows
-            ]
-        ),
-        200,
-    )
-
+    # rows = query.order_by(Scenario.created_at.desc()).all()
+    # return (
+    #     jsonify(
+    #         [
+    #             {
+    #                 "id": s.id,
+    #                 "name": s.name,
+    #                 "difficulty": s.difficulty,
+    #                 "vuln_type": s.vuln_type,
+    #                 "challenge_description": s.challenge_description,
+    #                 "rule_json": s.rule_json,
+    #                 "created_at": s.created_at.isoformat(),
+    #             }
+    #             for s in rows
+    #         ]
+    #     ),
+    #     200,
+    # )
+    scenarios = Scenario.query.order_by(Scenario.id.desc()).all()
+    
+    results = []
+    for s in scenarios:
+        results.append({
+            "id": s.id,
+            "name": getattr(s, 'name', 'Unknown'),
+            # 🚨 ดึง vuln_type มาใส่ในคีย์ type ให้ Frontend ใช้
+            "type": getattr(s, 'vuln_type', 'other'),
+            "difficulty": getattr(s, 'difficulty', 'unknown'),
+            # 🚨 แก้ชื่อคอลัมน์ให้ตรงกับ Database คือ challenge_description
+            "description": getattr(s, 'challenge_description', ''),
+            "created_at": s.created_at.isoformat() if getattr(s, 'created_at', None) else None
+        })
+        
+    return jsonify(results), 200
 
 @scenario_bp.delete("/delete/<int:scenario_id>")
 @login_required

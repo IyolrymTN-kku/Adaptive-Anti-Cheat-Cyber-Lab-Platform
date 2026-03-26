@@ -91,25 +91,25 @@ def status_challenge():
             200,
         )
 
-    # 🚨 THE MAGIC IS HERE: Just-In-Time (JIT) Provisioning สำหรับนักเรียน
-    if current_user.role == "student":
-        # เช็คว่านักเรียนมีโจทย์รันอยู่หรือยัง
-        my_active = Challenge.query.filter_by(team_id=current_user.id, status="active").first()
-        if not my_active:
-            # ถังยังไม่มี ให้ไปแอบดูว่าตอนนี้มีคลาสของ Instructor คนไหนกำลังเปิดอยู่ไหม
-            instructors = User.query.filter_by(role="instructor").all()
-            instructor_ids = [i.id for i in instructors]
+    # # 🚨 THE MAGIC IS HERE: Just-In-Time (JIT) Provisioning สำหรับนักเรียน
+    # if current_user.role == "student":
+    #     # เช็คว่านักเรียนมีโจทย์รันอยู่หรือยัง
+    #     my_active = Challenge.query.filter_by(team_id=current_user.id, status="active").first()
+    #     if not my_active:
+    #         # ถังยังไม่มี ให้ไปแอบดูว่าตอนนี้มีคลาสของ Instructor คนไหนกำลังเปิดอยู่ไหม
+    #         instructors = User.query.filter_by(role="instructor").all()
+    #         instructor_ids = [i.id for i in instructors]
             
-            if instructor_ids:
-                instructor_active = Challenge.query.filter(
-                    Challenge.team_id.in_(instructor_ids),
-                    Challenge.status == "active"
-                ).order_by(Challenge.id.desc()).first()
+    #         if instructor_ids:
+    #             instructor_active = Challenge.query.filter(
+    #                 Challenge.team_id.in_(instructor_ids),
+    #                 Challenge.status == "active"
+    #             ).order_by(Challenge.id.desc()).first()
 
-                # ถ้ามีคลาสเปิดอยู่ ระบบจะสั่งปั้น Container ให้นักเรียนคนนี้ทันที! (เสกสดๆ ตอนเปิดหน้าเว็บ)
-                if instructor_active:
-                    docker_service = current_app.extensions["docker_service"]
-                    docker_service.start_challenge(instructor_active.scenario_id, current_user.id)
+    #             # ถ้ามีคลาสเปิดอยู่ ระบบจะสั่งปั้น Container ให้นักเรียนคนนี้ทันที! (เสกสดๆ ตอนเปิดหน้าเว็บ)
+    #             if instructor_active:
+    #                 docker_service = current_app.extensions["docker_service"]
+    #                 docker_service.start_challenge(instructor_active.scenario_id, current_user.id)
 
     # คืนค่าโจทย์กลับไปให้ Frontend แสดงผล
     query = Challenge.query
