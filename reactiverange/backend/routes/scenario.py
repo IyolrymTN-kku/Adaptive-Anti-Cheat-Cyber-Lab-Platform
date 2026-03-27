@@ -17,6 +17,10 @@ def generate_scenario():
     vuln_type = data.get("vuln_type")
     difficulty = data.get("difficulty")
     custom_description = data.get("custom_description", "")
+    # T_expected: instructor-defined expected solve time in seconds (sent as minutes from UI)
+    expected_time = int(data.get("expected_time", 300))
+    if expected_time < 30:
+        expected_time = 30  # minimum 30 seconds
 
     if vuln_type not in {"sql_injection", "xss", "cmd_injection"}:
         return jsonify({"error": "Invalid vuln_type"}), 400
@@ -39,6 +43,7 @@ def generate_scenario():
         challenge_description=payload["challenge_description"],
         expected_solution_path=payload["expected_solution_path"],
         flag=payload["flag"],
+        expected_time=expected_time,
         created_by=current_user.id,
     )
     db.session.add(scenario)
@@ -57,6 +62,7 @@ def generate_scenario():
                     "challenge_description": scenario.challenge_description,
                     "expected_solution_path": scenario.expected_solution_path,
                     "flag": scenario.flag,
+                    "expected_time": scenario.expected_time,
                 },
             }
         ),
@@ -101,6 +107,7 @@ def list_scenarios():
             "difficulty": getattr(s, 'difficulty', 'unknown'),
             # 🚨 แก้ชื่อคอลัมน์ให้ตรงกับ Database คือ challenge_description
             "description": getattr(s, 'challenge_description', ''),
+            "expected_time": getattr(s, 'expected_time', 300),
             "created_at": s.created_at.isoformat() if getattr(s, 'created_at', None) else None
         })
         

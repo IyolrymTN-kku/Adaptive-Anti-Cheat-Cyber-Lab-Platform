@@ -167,9 +167,8 @@ def trigger_mtd():
 @challenge_bp.post("/submit")
 @login_required
 def submit_flag():
-    from models import Event, Score, db
-    from flask import current_app
     from datetime import datetime
+    from models import Event, db
 
     data = request.get_json(force=True)
     challenge_id = data.get("challenge_id")
@@ -187,32 +186,31 @@ def submit_flag():
         if challenge.status == "solved":
             return jsonify({"success": True, "message": "You already solved this challenge!"}), 200
 
-        points = 100
-        if scenario.difficulty == 'medium': points = 200
-        if scenario.difficulty == 'hard': points = 300
+        # Actual time elapsed since challenge started (seconds)
+        t_actual = (
+            (datetime.utcnow() - challenge.started_at).total_seconds()
+            if challenge.started_at
+            else 300.0
+        )
 
-        # 2. ค้นหาหรือสร้าง Score ใหม่
-        score_entry = Score.query.filter_by(user_id=current_user.id, challenge_id=challenge.id).first()
-        if not score_entry:
-            score_entry = Score(
-                user_id=current_user.id, 
-                challenge_id=challenge.id,
-                base_score=0.0,
-                net_score=0.0,
-                solved=0
-            )
-            db.session.add(score_entry)
-        
-        score_entry.base_score = (score_entry.base_score or 0.0) + points
-        score_entry.net_score = (score_entry.net_score or 0.0) + points
-        score_entry.solved = 1  # อัปเดตว่าโจทย์ข้อนี้ผ่านแล้ว
-        score_entry.last_activity = datetime.utcnow()
+        # Calculate score using the paper formula:
+        # S = max(0, min(W_a × (T_expected / T_actual) − W_p × E_trap, 2 × W_a))
+        scorer = ScoringService()
+        score_entry = scorer.record_solve(
+            user_id=current_user.id,
+            challenge_id=challenge.id,
+            difficulty=scenario.difficulty,
+            t_actual=t_actual,
+            t_expected=getattr(scenario, "expected_time", None),
+        )
 
-        # 3. บันทึก Event
         solve_event = Event(
             challenge_id=challenge.id,
             type="score_update",
-            details={"message": "Flag captured successfully!", "points_added": points}
+            details={
+                "message": "Flag captured successfully!",
+                "points_added": score_entry.net_score,
+            },
         )
         db.session.add(solve_event)
         db.session.commit()
@@ -220,7 +218,7 @@ def submit_flag():
         docker_service = current_app.extensions.get("docker_service")
         if docker_service:
             try:
-                docker_service._emit("score_update", {"challenge_id": challenge.id, "points": points})
+                docker_service._emit("score_update", {"challenge_id": challenge.id, "points": score_entry.net_score})
                 docker_service.stop_challenge(challenge.id)
             except Exception as e:
                 print(f"Cleanup error: {e}")
@@ -228,6 +226,6 @@ def submit_flag():
         challenge.status = "solved"
         db.session.commit()
 
-        return jsonify({"success": True, "message": f"Correct Flag! +{points} Points!"}), 200
+        return jsonify({"success": True, "message": f"Correct Flag! +{round(score_entry.net_score)} Points!"}), 200
     else:
         return jsonify({"success": False, "message": "Incorrect Flag. Keep trying!"}), 200

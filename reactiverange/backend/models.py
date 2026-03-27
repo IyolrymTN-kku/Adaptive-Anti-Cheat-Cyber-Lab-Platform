@@ -34,6 +34,7 @@ class Scenario(db.Model):
     challenge_description = db.Column(db.Text, nullable=False)
     expected_solution_path = db.Column(db.Text, nullable=False)
     flag = db.Column(db.String(255), nullable=False)
+    expected_time = db.Column(db.Integer, nullable=False, default=300)  # seconds, T_expected in scoring formula
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 

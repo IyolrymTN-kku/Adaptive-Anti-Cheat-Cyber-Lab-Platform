@@ -47,6 +47,22 @@ def load_user_from_request(request):
     return db.session.get(User, int(user_id))
 
 
+def _migrate_add_columns(db):
+    """Add new columns to existing tables when upgrading without Alembic."""
+    migrations = [
+        ("scenarios", "expected_time", "INTEGER NOT NULL DEFAULT 300"),
+    ]
+    with db.engine.connect() as conn:
+        for table, column, col_def in migrations:
+            result = conn.execute(
+                db.text(f"PRAGMA table_info({table})")
+            )
+            existing = [row[1] for row in result]
+            if column not in existing:
+                conn.execute(db.text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"))
+                conn.commit()
+
+
 def create_app():
     load_dotenv()
 
@@ -61,6 +77,7 @@ def create_app():
 
     with app.app_context():
         db.create_all()
+        _migrate_add_columns(db)
 
         app.extensions["mail_service"] = MailService(mail)
         app.extensions["gemini_service"] = GeminiService(app.config["GEMINI_API_KEY"])

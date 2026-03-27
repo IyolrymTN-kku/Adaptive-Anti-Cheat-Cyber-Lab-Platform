@@ -6,7 +6,8 @@ export default function ScenarioStudioPage() {
   const [form, setForm] = useState({
     vuln_type: 'sql_injection',
     difficulty: 'easy',
-    custom_description: ''
+    custom_description: '',
+    expected_time_minutes: 5,  // UI uses minutes; sent to API as seconds
   });
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState(null);
@@ -32,7 +33,11 @@ export default function ScenarioStudioPage() {
     setLoading(true);
     setError('');
     try {
-      const { data } = await apiClient.post('/api/scenario/generate', form);
+      const payload = {
+        ...form,
+        expected_time: Math.max(1, Number(form.expected_time_minutes)) * 60,
+      };
+      const { data } = await apiClient.post('/api/scenario/generate', payload);
       setPreview(data.preview);
       setScenarioId(data.scenario_id);
       await loadScenarios();
@@ -97,6 +102,27 @@ export default function ScenarioStudioPage() {
               <option value="medium">Medium</option>
               <option value="hard">Hard</option>
             </select>
+          </div>
+
+          <div className="mt-3">
+            <label className="mb-1 block text-xs text-green-400">
+              Expected Solve Time (T<sub>expected</sub>) — minutes
+            </label>
+            <div className="flex items-center gap-3">
+              <input
+                type="number"
+                min={1}
+                max={120}
+                value={form.expected_time_minutes}
+                onChange={(event) =>
+                  setForm((prev) => ({ ...prev, expected_time_minutes: Number(event.target.value) }))
+                }
+                className="w-24 rounded-md border border-green-500/30 bg-gray-900/50 px-3 py-2 text-sm text-green-300 dark:bg-gray-900/50 bg-white"
+              />
+              <span className="text-xs text-slate-400">
+                = {form.expected_time_minutes * 60} seconds — used in scoring formula: W<sub>a</sub> × (T<sub>exp</sub> / T<sub>actual</sub>)
+              </span>
+            </div>
           </div>
           <textarea
             value={form.custom_description}
@@ -167,6 +193,7 @@ export default function ScenarioStudioPage() {
                 <th className="px-3 py-2">Name</th>
                 <th className="px-3 py-2">Type</th>
                 <th className="px-3 py-2">Difficulty</th>
+                <th className="px-3 py-2">T<sub>expected</sub></th>
                 <th className="px-3 py-2">Actions</th>
               </tr>
             </thead>
@@ -174,8 +201,11 @@ export default function ScenarioStudioPage() {
               {scenarios.map((scenario) => (
                 <tr key={scenario.id} className="border-b border-green-500/10">
                   <td className="px-3 py-2">{scenario.name}</td>
-                  <td className="px-3 py-2">{scenario.vuln_type}</td>
+                  <td className="px-3 py-2">{scenario.type}</td>
                   <td className="px-3 py-2">{scenario.difficulty}</td>
+                  <td className="px-3 py-2 text-amber-300">
+                    {scenario.expected_time ? `${Math.round(scenario.expected_time / 60)} min` : '-'}
+                  </td>
                   <td className="px-3 py-2">
                     <button
                       type="button"
