@@ -47,7 +47,7 @@ class Challenge(db.Model):
     scenario_id = db.Column(db.Integer, db.ForeignKey("scenarios.id"), nullable=False)
     status = db.Column(db.String(20), nullable=False, default="stopped")
     container_id = db.Column(db.String(128), nullable=True)
-    current_port = db.Column(db.Integer, nullable=True)
+    current_port = db.Column(db.Integer, nullable=True)  # reused as host-side VNC access port
     team_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     started_at = db.Column(db.DateTime, nullable=True)
 

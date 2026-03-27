@@ -16,6 +16,7 @@ export default function ChallengePage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [flagInput, setFlagInput] = useState('');
   const [submitStatus, setSubmitStatus] = useState(null);
+  const [mtdNotice, setMtdNotice] = useState(null);
   
   //  State สำหรับเก็บเวลานับถอยหลัง
   const [timeLeft, setTimeLeft] = useState('15:00');
@@ -143,6 +144,24 @@ export default function ChallengePage() {
       }
     } catch (err) {
       setSubmitStatus({ type: 'error', msg: err.message || "Submission failed" });
+    }
+  };
+
+  const triggerManualMtd = async () => {
+    if (!challenge?.id) return;
+    setError('');
+    try {
+      const { data } = await apiClient.post('/api/challenge/trigger-mtd', {
+        challenge_id: challenge.id,
+        event_type: 'manual_trigger'
+      });
+
+      const honeypotIp = data?.honeypot_new_ip || 'unknown';
+      setMtdNotice(`MTD Active! Traffic redirected to Honeypot IP: ${honeypotIp}`);
+      setTimeout(() => setMtdNotice(null), 6000);
+      await loadData();
+    } catch (err) {
+      setError(err.message || 'Failed to trigger MTD');
     }
   };
 
@@ -289,6 +308,25 @@ export default function ChallengePage() {
                           Instance Time Remaining: <span className="font-mono font-bold text-sm text-amber-500">{timeLeft}</span>
                         </p>
 
+                        <a
+                          href={`http://localhost:${challenge.current_port || challenge.port}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-indigo-500"
+                        >
+                          💻 Open Kali Linux Console
+                        </a>
+
+                        {user?.role === 'instructor' && (
+                          <button
+                            type="button"
+                            onClick={triggerManualMtd}
+                            className="ml-3 inline-flex items-center justify-center rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-emerald-500"
+                          >
+                            🛡️ Trigger MTD (IP Hopping)
+                          </button>
+                        )}
+
                         <div className="pt-2">
                             <button onClick={stopChallenge} className="text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 text-sm font-semibold transition underline">
                               Terminate Instance
@@ -348,6 +386,12 @@ export default function ChallengePage() {
         </div>
         );
       })()}
+
+      {mtdNotice && (
+        <div className="fixed bottom-6 right-6 z-[60] max-w-md rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-900 shadow-2xl dark:border-emerald-500/40 dark:bg-emerald-900/70 dark:text-emerald-100">
+          {mtdNotice}
+        </div>
+      )}
     </div>
   );
 }

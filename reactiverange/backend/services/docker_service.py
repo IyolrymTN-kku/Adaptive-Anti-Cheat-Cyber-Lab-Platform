@@ -1,9 +1,14 @@
 import io
+import json
+import os
 import random
+import socket
+import subprocess
 import tarfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import docker
 from docker.errors import DockerException
@@ -11,14 +16,24 @@ from docker.errors import DockerException
 from models import Challenge, Event, Scenario, db
 from services.mtd_engine import AdaptiveMTDEngine
 
-from datetime import datetime, timedelta
-
 
 class DockerService:
     def __init__(self, socketio=None, app=None):
         self.socketio = socketio
         self.app = app
         self.engines = {}
+
+        base_dir = Path(__file__).resolve().parent
+        self.template_dir = base_dir / "templates"
+        self.temp_dir = base_dir / "tmp"
+        self.port_lock_dir = base_dir / "port_locks"
+        self.state_dir = base_dir / "state"
+
+        self.template_dir.mkdir(parents=True, exist_ok=True)
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.port_lock_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+
         self.client = None
         try:
             self.client = docker.from_env()
@@ -38,9 +53,155 @@ class DockerService:
         self._emit(event_type, {"challenge_id": challenge_id, "details": details})
         return event
 
+    def _state_file(self, challenge_id):
+        return self.state_dir / f"challenge-{challenge_id}.json"
+
+    def _compose_file(self, challenge_id):
+        return self.temp_dir / f"docker-compose-{challenge_id}.yml"
+
+    def _save_state(self, challenge_id, payload):
+        self._state_file(challenge_id).write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+    def _load_state(self, challenge_id):
+        state_file = self._state_file(challenge_id)
+        if not state_file.exists():
+            return None
+        try:
+            return json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _clear_state(self, challenge_id):
+        try:
+            self._state_file(challenge_id).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _is_port_bindable(self, port):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                return False
+        return True
+
+    def _reserve_port_lock(self, port):
+        lock_file = self.port_lock_dir / f"{port}.lock"
+        try:
+            fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
+    def _release_port_lock(self, port):
+        if not port:
+            return
+        lock_file = self.port_lock_dir / f"{port}.lock"
+        try:
+            lock_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def get_free_port(self, min_port=5901, max_port=5999):
+        candidates = list(range(min_port, max_port + 1))
+        random.shuffle(candidates)
+        for port in candidates:
+            if not self._is_port_bindable(port):
+                continue
+            if self._reserve_port_lock(port):
+                return port
+        raise RuntimeError("No free VNC port available")
+
+    def _run_compose(self, challenge_id, compose_file, command):
+        cmd = [
+            "docker",
+            "compose",
+            "-p",
+            str(challenge_id),
+            "-f",
+            str(compose_file),
+            *command,
+        ]
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return result
+        except subprocess.CalledProcessError as e:
+            error_msg = f"docker compose command failed: {' '.join(cmd)}\n"
+            if e.stderr:
+                error_msg += f"stderr: {e.stderr}\n"
+            if e.stdout:
+                error_msg += f"stdout: {e.stdout}"
+            print(f"[DOCKER COMPOSE ERROR] {error_msg}")
+            raise RuntimeError(error_msg) from e
+
+    def _run_docker(self, args, check=True):
+        return subprocess.run(["docker", *args], check=check, capture_output=True, text=True)
+
+    def _resolve_service_container(self, project_name, service_name):
+        result = self._run_docker(
+            [
+                "ps",
+                "-q",
+                "--filter",
+                f"label=com.docker.compose.project={project_name}",
+                "--filter",
+                f"label=com.docker.compose.service={service_name}",
+            ],
+            check=False,
+        )
+        container_id = (result.stdout or "").strip().splitlines()
+        return container_id[0] if container_id else None
+
+    def _resolve_project_network(self, project_name):
+        result = self._run_docker(
+            [
+                "network",
+                "ls",
+                "--filter",
+                f"label=com.docker.compose.project={project_name}",
+                "--format",
+                "{{.Name}}",
+            ],
+            check=False,
+        )
+        names = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        if names:
+            return names[0]
+
+        preferred_names = [
+            f"{project_name}_cyber_range_net",
+            f"{project_name}_default",
+            f"{project_name}-cyber_range_net",
+        ]
+        for name in preferred_names:
+            inspect = self._run_docker(["network", "inspect", name], check=False)
+            if inspect.returncode == 0:
+                return name
+        return None
+
+    def _inspect_network_ip(self, container_id, network_name):
+        result = self._run_docker(
+            [
+                "inspect",
+                "-f",
+                "{{index .NetworkSettings.Networks \"" + network_name + "\" \"IPAddress\"}}",
+                container_id,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        ip = (result.stdout or "").strip()
+        return ip or None
+
     def _build_image_from_scenario(self, scenario: Scenario):
         if not self.client:
-            return None
+            raise RuntimeError("Docker daemon is unavailable for image build")
 
         dockerfile_bytes = scenario.dockerfile_content.encode("utf-8")
         image_tag = f"reactiverange/scenario-{scenario.id}:latest"
@@ -65,126 +226,93 @@ class DockerService:
         )
         return image_tag
 
-    def _run_container(self, image_tag, port):
-        if not self.client:
-            return None
-        container = self.client.containers.run(
-            image_tag,
-            detach=True,
-            ports={"5000/tcp": port},
-            auto_remove=True,
-            name=f"reactiverange-{int(time.time())}-{random.randint(1000, 9999)}",
-        )
-        return container
-
-    def _monitor_logs(self, challenge_id, container):
-        if not self.client or not container:
-            return
-
-        def _worker():
-            try:
-                for line in container.logs(stream=True, follow=True):
-                    content = line.decode("utf-8", errors="ignore").strip()
-                    if not content:
-                        continue
-                    
-                    # Use app context for database operations
-                    if self.app:
-                        with self.app.app_context():
-                            self._record_event(
-                                challenge_id,
-                                "attack_detected" if "attack" in content.lower() else "system_log",
-                                {"log": content},
-                            )
-                    else:
-                        # If no app context, just emit without recording to DB
-                        self._emit(
-                            "attack_detected" if "attack" in content.lower() else "system_log",
-                            {"challenge_id": challenge_id, "log": content},
-                        )
-            except Exception as exc:
-                if self.app:
-                    with self.app.app_context():
-                        self._record_event(challenge_id, "system_log", {"error": str(exc)})
-                else:
-                    self._emit("system_log", {"challenge_id": challenge_id, "error": str(exc)})
-
-        thread = threading.Thread(target=_worker, daemon=True)
-        thread.start()
-
     def start_challenge(self, scenario_id, team_id):
         scenario = Scenario.query.get(scenario_id)
         if not scenario:
             raise ValueError("Scenario not found")
 
-        port = random.randint(1024, 65535)
-        image_tag = None
-        container = None
-
-        if self.client:
-            image_tag = self._build_image_from_scenario(scenario)
-            container = self._run_container(image_tag, port)
-
         challenge = Challenge(
             name=f"{scenario.name} - Team {team_id}",
             scenario_id=scenario_id,
-            status="active",
-            container_id=container.id if container else "simulated-container",
-            current_port=port,
+            status="provisioning",
+            container_id=None,
+            current_port=None,
             team_id=team_id,
             started_at=datetime.utcnow(),
         )
         db.session.add(challenge)
-        db.session.commit()
+        db.session.flush()
+
+        vnc_port = None
+        compose_file = self._compose_file(challenge.id)
+
+        try:
+            image_tag = self._build_image_from_scenario(scenario)
+            vnc_port = self.get_free_port()
+
+            template_path = self.template_dir / "base_topology.yml"
+            if not template_path.exists():
+                raise FileNotFoundError(
+                    f"Topology template not found at {template_path}. "
+                    f"Please create {template_path} with docker compose service definitions for Kali, victim, and honeypot."
+                )
+
+            compose_content = template_path.read_text(encoding="utf-8")
+            compose_content = compose_content.replace("${VNC_PORT}", str(vnc_port))
+            compose_content = compose_content.replace("${VULN_IMAGE}", image_tag)
+
+            print(f"[DOCKER SERVICE] Generated compose file for challenge {challenge.id}:")
+            print(f"[DOCKER SERVICE] === Compose Content ===\n{compose_content}\n=== End ===")
+
+            compose_file.write_text(compose_content, encoding="utf-8")
+
+            self._run_compose(challenge.id, compose_file, ["up", "-d"])
+
+            challenge.container_id = f"compose-{challenge.id}"
+            challenge.current_port = vnc_port
+            challenge.status = "active"
+
+            self._save_state(
+                challenge.id,
+                {
+                    "project": str(challenge.id),
+                    "compose_file": str(compose_file),
+                    "vnc_port": vnc_port,
+                    "image_tag": image_tag,
+                },
+            )
+            db.session.commit()
+        except Exception as e:
+            if vnc_port:
+                self._release_port_lock(vnc_port)
+            try:
+                compose_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+            db.session.rollback()
+            error_context = f"Failed to start challenge for scenario {scenario_id}: {str(e)}"
+            print(f"[CHALLENGE START ERROR] {error_context}")
+            raise RuntimeError(error_context) from e
 
         self.engines[challenge.id] = AdaptiveMTDEngine()
         self._record_event(
             challenge.id,
             "challenge_started",
-            {"port": port, "container_id": challenge.container_id},
+            {
+                "vnc_port": challenge.current_port,
+                "container_id": challenge.container_id,
+                "compose_file": str(compose_file),
+            },
         )
 
-        if container:
-            self._monitor_logs(challenge.id, container)
-
         return challenge
-
-    def _restart_container(self, challenge, new_port):
-        if not self.client:
-            challenge.current_port = new_port
-            db.session.commit()
-            return
-
-        scenario = Scenario.query.get(challenge.scenario_id)
-        image_tag = f"reactiverange/scenario-{scenario.id}:latest"
-
-        if challenge.container_id:
-            try:
-                old_container = self.client.containers.get(challenge.container_id)
-                old_container.kill(signal="SIGKILL")
-            except Exception:
-                pass
-
-        new_container = self._run_container(image_tag, new_port)
-        challenge.container_id = new_container.id
-        challenge.current_port = new_port
-        db.session.commit()
-        self._monitor_logs(challenge.id, new_container)
 
     def spawn_honeypot(self, challenge_id):
         challenge = Challenge.query.get(challenge_id)
         if not challenge:
             raise ValueError("Challenge not found")
 
-        honeypot_port = min(challenge.current_port + 1, 65535) if challenge.current_port else random.randint(1024, 65535)
-
-        if self.client:
-            scenario = Scenario.query.get(challenge.scenario_id)
-            image_tag = f"reactiverange/scenario-{scenario.id}:latest"
-            try:
-                self._run_container(image_tag, honeypot_port)
-            except Exception:
-                pass
+        honeypot_port = min(challenge.current_port + 1, 65535) if challenge.current_port else None
 
         self._record_event(
             challenge.id,
@@ -192,6 +320,55 @@ class DockerService:
             {"honeypot_port": honeypot_port, "message": "Decoy container spawned."},
         )
         return honeypot_port
+
+    def trigger_mtd_ip_hopping(self, challenge_id):
+        challenge = Challenge.query.get(challenge_id)
+        if not challenge:
+            raise ValueError("Challenge not found")
+
+        project_name = str(challenge.id)
+        network_name = self._resolve_project_network(project_name)
+        if not network_name:
+            raise RuntimeError(f"No compose network found for challenge {challenge_id}")
+
+        victim_container = self._resolve_service_container(project_name, "victim")
+        if not victim_container:
+            raise RuntimeError(f"Victim container not found for challenge {challenge_id}")
+
+        honeypot_container = self._resolve_service_container(project_name, "honeypot")
+        if not honeypot_container:
+            raise RuntimeError(f"Honeypot container not found for challenge {challenge_id}")
+
+        hop_tag = int(time.time())
+        victim_alias = f"victim-hop-{hop_tag}"
+        honeypot_alias = f"honeypot-hop-{hop_tag}"
+
+        self._run_docker(["network", "disconnect", network_name, victim_container], check=False)
+        self._run_docker(["network", "disconnect", network_name, honeypot_container], check=False)
+
+        self._run_docker(
+            ["network", "connect", "--alias", "victim", "--alias", victim_alias, network_name, honeypot_container],
+            check=True,
+        )
+        self._run_docker(
+            ["network", "connect", "--alias", "honeypot", "--alias", honeypot_alias, network_name, victim_container],
+            check=True,
+        )
+
+        victim_new_ip = self._inspect_network_ip(victim_container, network_name)
+        honeypot_new_ip = self._inspect_network_ip(honeypot_container, network_name)
+
+        details = {
+            "success": True,
+            "network": network_name,
+            "victim_container": victim_container,
+            "honeypot_container": honeypot_container,
+            "victim_new_ip": victim_new_ip,
+            "honeypot_new_ip": honeypot_new_ip,
+            "message": "Swapped Victim and Honeypot IPs at the network layer",
+        }
+        self._record_event(challenge_id, "mtd_ip_hop", details)
+        return details
 
     def trigger_mtd(self, challenge_id, event_type="attack_detected"):
         challenge = Challenge.query.get(challenge_id)
@@ -203,10 +380,9 @@ class DockerService:
 
         decision = engine.decide_action(event_type)
 
-        if decision["action"] == "port_migrate" and decision["new_port"]:
-            self._restart_container(challenge, decision["new_port"])
-        elif decision["action"] in {"add_honeypot", "honeypot_swarm"}:
-            self.spawn_honeypot(challenge_id)
+        if decision.get("action") == "network_ip_hopping":
+            hop_details = self.trigger_mtd_ip_hopping(challenge_id)
+            decision = {**decision, **hop_details}
 
         self._record_event(challenge_id, "mtd_triggered", decision)
         return decision
@@ -216,12 +392,22 @@ class DockerService:
         if not challenge:
             raise ValueError("Challenge not found")
 
-        if self.client and challenge.container_id:
-            try:
-                container = self.client.containers.get(challenge.container_id)
-                container.kill(signal="SIGKILL")
-            except Exception:
-                pass
+        state = self._load_state(challenge_id) or {}
+        compose_file = Path(state.get("compose_file", str(self._compose_file(challenge_id))))
+
+        try:
+            if compose_file.exists():
+                self._run_compose(challenge_id, compose_file, ["down", "-v"])
+        except Exception:
+            pass
+
+        self._release_port_lock(challenge.current_port)
+
+        try:
+            compose_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._clear_state(challenge_id)
 
         challenge.status = "stopped"
         db.session.commit()

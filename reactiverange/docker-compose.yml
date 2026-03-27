@@ -6,6 +6,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./backend/instance:/app/instance
+      
+      - ./backend/services/tmp:/app/services/tmp
+      - ./backend/services/templates:/app/services/templates
     env_file:
       - .env
 
