@@ -35,8 +35,14 @@ class Scenario(db.Model):
     expected_solution_path = db.Column(db.Text, nullable=False)
     flag = db.Column(db.String(255), nullable=False)
     expected_time = db.Column(db.Integer, nullable=False, default=300)  # seconds, T_expected in scoring formula
+    scenario_dir_path = db.Column(db.String(512), nullable=True)  # absolute path to generated scenario files
     created_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    # Cascade delete: removing a Scenario cleans up all its Challenge rows at the
+    # ORM level (works with SQLite regardless of PRAGMA foreign_keys setting).
+    # This prevents orphaned Challenge records from poisoning a recycled scenario ID.
+    challenges = db.relationship("Challenge", cascade="all, delete-orphan")
 
 
 class Challenge(db.Model):

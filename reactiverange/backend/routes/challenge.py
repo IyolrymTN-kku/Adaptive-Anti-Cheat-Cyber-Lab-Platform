@@ -19,15 +19,31 @@ def start_challenge():
     if not scenario:
         return jsonify({"error": "Scenario not found"}), 404
 
-    docker_service = current_app.extensions["docker_service"]
+    # Scenarios generated before the multi-container refactor won't have files on disk.
+    if not scenario.scenario_dir_path:
+        return jsonify({
+            "error": (
+                "This scenario was generated before the multi-container upgrade. "
+                "Please ask an instructor to regenerate it."
+            )
+        }), 422
 
-    challenge = docker_service.start_challenge(scenario_id, current_user.id)
+    docker_service = current_app.extensions["docker_service"]
+    try:
+        challenge = docker_service.start_challenge(scenario_id, current_user.id)
+    except ValueError as exc:
+        # Configuration problems (missing dir, missing compose file, etc.)
+        return jsonify({"error": str(exc)}), 422
+    except RuntimeError as exc:
+        # Docker/subprocess failures
+        return jsonify({"error": f"Failed to launch instance: {exc}"}), 500
 
     return (
         jsonify(
             {
                 "id": challenge.id,
                 "status": challenge.status,
+                # current_port = VNC port — used by "Open Kali Linux Console" button
                 "port": challenge.current_port,
                 "container_id": challenge.container_id,
             }

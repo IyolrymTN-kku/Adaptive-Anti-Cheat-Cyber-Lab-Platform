@@ -1,10 +1,8 @@
-import io
 import json
 import os
 import random
 import socket
 import subprocess
-import tarfile
 import threading
 import time
 from datetime import datetime, timedelta
@@ -24,16 +22,13 @@ class DockerService:
         self.engines = {}
 
         base_dir = Path(__file__).resolve().parent
-        self.template_dir = base_dir / "templates"
-        self.temp_dir = base_dir / "tmp"
         self.port_lock_dir = base_dir / "port_locks"
         self.state_dir = base_dir / "state"
 
-        self.template_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.port_lock_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
 
+        # Docker SDK client kept for potential diagnostics; primary ops use CLI subprocess.
         self.client = None
         try:
             self.client = docker.from_env()
@@ -41,6 +36,8 @@ class DockerService:
             self.client = None
 
         self._start_reaper()
+
+    # ------------------------------------------------------------------ events
 
     def _emit(self, event_type, payload):
         if self.socketio:
@@ -53,16 +50,14 @@ class DockerService:
         self._emit(event_type, {"challenge_id": challenge_id, "details": details})
         return event
 
+    # ------------------------------------------------------------------ state
+
     def _state_file(self, challenge_id):
         return self.state_dir / f"challenge-{challenge_id}.json"
 
-    def _compose_file(self, challenge_id):
-        return self.temp_dir / f"docker-compose-{challenge_id}.yml"
-
     def _save_state(self, challenge_id, payload):
         self._state_file(challenge_id).write_text(
-            json.dumps(payload, indent=2),
-            encoding="utf-8",
+            json.dumps(payload, indent=2), encoding="utf-8"
         )
 
     def _load_state(self, challenge_id):
@@ -79,6 +74,8 @@ class DockerService:
             self._state_file(challenge_id).unlink(missing_ok=True)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ ports
 
     def _is_port_bindable(self, port):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -107,7 +104,7 @@ class DockerService:
         except Exception:
             pass
 
-    def get_free_port(self, min_port=5901, max_port=5999):
+    def get_free_port(self, min_port=8080, max_port=8999):
         candidates = list(range(min_port, max_port + 1))
         random.shuffle(candidates)
         for port in candidates:
@@ -115,29 +112,44 @@ class DockerService:
                 continue
             if self._reserve_port_lock(port):
                 return port
-        raise RuntimeError("No free VNC port available")
+        raise RuntimeError(f"No free port available in range {min_port}–{max_port}")
 
-    def _run_compose(self, challenge_id, compose_file, command):
-        cmd = [
-            "docker",
-            "compose",
-            "-p",
-            str(challenge_id),
-            "-f",
-            str(compose_file),
-            *command,
-        ]
+    # ------------------------------------------------------------------ compose runner
+
+    def _run_compose_in_dir(self, project_name, scenario_dir, command, extra_env=None):
+        """
+        Run `docker compose -p <project_name> <command>` with cwd=scenario_dir.
+        extra_env values are merged on top of the current process environment so
+        that WEB_PORT / VNC_PORT variable substitution in the compose file works.
+        """
+        env = os.environ.copy()
+        if extra_env:
+            env.update({k: str(v) for k, v in extra_env.items()})
+
+        cmd = ["docker", "compose", "-p", project_name, *command]
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=str(scenario_dir),
+                env=env,
+            )
             return result
-        except subprocess.CalledProcessError as e:
-            error_msg = f"docker compose command failed: {' '.join(cmd)}\n"
-            if e.stderr:
-                error_msg += f"stderr: {e.stderr}\n"
-            if e.stdout:
-                error_msg += f"stdout: {e.stdout}"
+        except subprocess.CalledProcessError as exc:
+            error_msg = (
+                f"docker compose {' '.join(command)} failed "
+                f"(project={project_name}, cwd={scenario_dir})\n"
+            )
+            if exc.stderr:
+                error_msg += f"stderr: {exc.stderr}\n"
+            if exc.stdout:
+                error_msg += f"stdout: {exc.stdout}"
             print(f"[DOCKER COMPOSE ERROR] {error_msg}")
-            raise RuntimeError(error_msg) from e
+            raise RuntimeError(error_msg) from exc
+
+    # ------------------------------------------------------------------ docker helpers (MTD)
 
     def _run_docker(self, args, check=True):
         return subprocess.run(["docker", *args], check=check, capture_output=True, text=True)
@@ -145,27 +157,21 @@ class DockerService:
     def _resolve_service_container(self, project_name, service_name):
         result = self._run_docker(
             [
-                "ps",
-                "-q",
-                "--filter",
-                f"label=com.docker.compose.project={project_name}",
-                "--filter",
-                f"label=com.docker.compose.service={service_name}",
+                "ps", "-q",
+                "--filter", f"label=com.docker.compose.project={project_name}",
+                "--filter", f"label=com.docker.compose.service={service_name}",
             ],
             check=False,
         )
-        container_id = (result.stdout or "").strip().splitlines()
-        return container_id[0] if container_id else None
+        container_ids = (result.stdout or "").strip().splitlines()
+        return container_ids[0] if container_ids else None
 
     def _resolve_project_network(self, project_name):
         result = self._run_docker(
             [
-                "network",
-                "ls",
-                "--filter",
-                f"label=com.docker.compose.project={project_name}",
-                "--format",
-                "{{.Name}}",
+                "network", "ls",
+                "--filter", f"label=com.docker.compose.project={project_name}",
+                "--format", "{{.Name}}",
             ],
             check=False,
         )
@@ -173,23 +179,20 @@ class DockerService:
         if names:
             return names[0]
 
-        preferred_names = [
+        for candidate in [
             f"{project_name}_cyber_range_net",
             f"{project_name}_default",
             f"{project_name}-cyber_range_net",
-        ]
-        for name in preferred_names:
-            inspect = self._run_docker(["network", "inspect", name], check=False)
-            if inspect.returncode == 0:
-                return name
+        ]:
+            if self._run_docker(["network", "inspect", candidate], check=False).returncode == 0:
+                return candidate
         return None
 
     def _inspect_network_ip(self, container_id, network_name):
         result = self._run_docker(
             [
-                "inspect",
-                "-f",
-                "{{index .NetworkSettings.Networks \"" + network_name + "\" \"IPAddress\"}}",
+                "inspect", "-f",
+                '{{index .NetworkSettings.Networks "' + network_name + '" "IPAddress"}}',
                 container_id,
             ],
             check=False,
@@ -199,38 +202,36 @@ class DockerService:
         ip = (result.stdout or "").strip()
         return ip or None
 
-    def _build_image_from_scenario(self, scenario: Scenario):
-        if not self.client:
-            raise RuntimeError("Docker daemon is unavailable for image build")
-
-        dockerfile_bytes = scenario.dockerfile_content.encode("utf-8")
-        image_tag = f"reactiverange/scenario-{scenario.id}:latest"
-        
-        # Create a tar archive with the Dockerfile
-        tar_buffer = io.BytesIO()
-        tar = tarfile.open(fileobj=tar_buffer, mode="w")
-        
-        dockerfile_tarinfo = tarfile.TarInfo(name="Dockerfile")
-        dockerfile_tarinfo.size = len(dockerfile_bytes)
-        tar.addfile(dockerfile_tarinfo, io.BytesIO(dockerfile_bytes))
-  
-        tar.close()
-        
-        tar_buffer.seek(0)
-        self.client.images.build(
-            fileobj=tar_buffer,
-            custom_context=True,
-            tag=image_tag,
-            rm=True,
-            pull=False,
-        )
-        return image_tag
+    # ------------------------------------------------------------------ lifecycle
 
     def start_challenge(self, scenario_id, team_id):
         scenario = Scenario.query.get(scenario_id)
         if not scenario:
             raise ValueError("Scenario not found")
 
+        # Guard: scenario must have been generated with the new multi-container flow.
+        if not scenario.scenario_dir_path:
+            raise ValueError(
+                f"Scenario {scenario_id} has no generated files (scenario_dir_path is not set). "
+                "Please ask an instructor to regenerate the scenario."
+            )
+
+        scenario_dir = Path(scenario.scenario_dir_path)
+        if not scenario_dir.exists():
+            raise ValueError(
+                f"Scenario directory not found at '{scenario_dir}'. "
+                "Please ask an instructor to regenerate the scenario."
+            )
+
+        compose_file = scenario_dir / "docker-compose.yml"
+        if not compose_file.exists():
+            raise ValueError(
+                f"docker-compose.yml not found inside '{scenario_dir}'. "
+                "Please ask an instructor to regenerate the scenario."
+            )
+
+        # Create the Challenge row and commit immediately to release the DB lock
+        # before the long-running docker compose build (10-30 s) begins.
         challenge = Challenge(
             name=f"{scenario.name} - Team {team_id}",
             scenario_id=scenario_id,
@@ -241,71 +242,132 @@ class DockerService:
             started_at=datetime.utcnow(),
         )
         db.session.add(challenge)
-        db.session.flush()
+        db.session.commit()  # full commit so other threads aren't blocked by our lock
 
+        challenge_id = challenge.id
+        # Use a namespaced project name to isolate concurrent instances of the same scenario.
+        project_name = f"challenge_{challenge_id}"
         vnc_port = None
-        compose_file = self._compose_file(challenge.id)
+        web_port = None
 
         try:
-            image_tag = self._build_image_from_scenario(scenario)
-            vnc_port = self.get_free_port()
+            # Allocate two host ports: one for VNC (Kali NoVNC), one for the web target.
+            vnc_port = self.get_free_port(min_port=6901, max_port=6999)
+            web_port = self.get_free_port(min_port=8080, max_port=8999)
 
-            template_path = self.template_dir / "base_topology.yml"
-            if not template_path.exists():
-                raise FileNotFoundError(
-                    f"Topology template not found at {template_path}. "
-                    f"Please create {template_path} with docker compose service definitions for Kali, victim, and honeypot."
-                )
+            print(
+                f"[CHALLENGE START] scenario={scenario_id}, project={project_name}, "
+                f"vnc_port={vnc_port}, web_port={web_port}, dir={scenario_dir}"
+            )
 
-            compose_content = template_path.read_text(encoding="utf-8")
-            compose_content = compose_content.replace("${VNC_PORT}", str(vnc_port))
-            compose_content = compose_content.replace("${VULN_IMAGE}", image_tag)
+            # Pass ports as environment variables — the compose file uses ${WEB_PORT} / ${VNC_PORT}.
+            # DB lock is NOT held during this long-running subprocess call.
+            self._run_compose_in_dir(
+                project_name,
+                scenario_dir,
+                ["up", "-d", "--build"],
+                extra_env={"WEB_PORT": web_port, "VNC_PORT": vnc_port},
+            )
 
-            print(f"[DOCKER SERVICE] Generated compose file for challenge {challenge.id}:")
-            print(f"[DOCKER SERVICE] === Compose Content ===\n{compose_content}\n=== End ===")
-
-            compose_file.write_text(compose_content, encoding="utf-8")
-
-            self._run_compose(challenge.id, compose_file, ["up", "-d"])
-
-            challenge.container_id = f"compose-{challenge.id}"
+            # Re-query the challenge after the long build to get a fresh session object.
+            challenge = Challenge.query.get(challenge_id)
+            # current_port stores the VNC port — used by the frontend "Open Kali Console" button.
+            challenge.container_id = project_name
             challenge.current_port = vnc_port
             challenge.status = "active"
 
             self._save_state(
-                challenge.id,
+                challenge_id,
                 {
-                    "project": str(challenge.id),
-                    "compose_file": str(compose_file),
+                    "project": project_name,
+                    "scenario_dir": str(scenario_dir),
                     "vnc_port": vnc_port,
-                    "image_tag": image_tag,
+                    "web_port": web_port,
                 },
             )
             db.session.commit()
-        except Exception as e:
+
+        except Exception as exc:
+            # Release reserved ports on any failure.
             if vnc_port:
                 self._release_port_lock(vnc_port)
+            if web_port:
+                self._release_port_lock(web_port)
+            # Mark the challenge row as failed so the UI can surface the error.
             try:
-                compose_file.unlink(missing_ok=True)
+                failed_challenge = Challenge.query.get(challenge_id)
+                if failed_challenge:
+                    failed_challenge.status = "failed"
+                    db.session.commit()
             except Exception:
                 pass
-            db.session.rollback()
-            error_context = f"Failed to start challenge for scenario {scenario_id}: {str(e)}"
-            print(f"[CHALLENGE START ERROR] {error_context}")
-            raise RuntimeError(error_context) from e
+            msg = f"Failed to start challenge for scenario {scenario_id}: {exc}"
+            print(f"[CHALLENGE START ERROR] {msg}")
+            raise RuntimeError(msg) from exc
 
-        self.engines[challenge.id] = AdaptiveMTDEngine()
+        self.engines[challenge_id] = AdaptiveMTDEngine()
         self._record_event(
-            challenge.id,
+            challenge_id,
             "challenge_started",
             {
-                "vnc_port": challenge.current_port,
-                "container_id": challenge.container_id,
-                "compose_file": str(compose_file),
+                "project": project_name,
+                "vnc_port": vnc_port,
+                "web_port": web_port,
+                "scenario_dir": str(scenario_dir),
             },
         )
-
         return challenge
+
+    def stop_challenge(self, challenge_id):
+        challenge = Challenge.query.get(challenge_id)
+        if not challenge:
+            raise ValueError("Challenge not found")
+
+        state = self._load_state(challenge_id) or {}
+        project_name = state.get("project", f"challenge_{challenge_id}")
+        scenario_dir_str = state.get("scenario_dir")
+        web_port = state.get("web_port")
+
+        # Bring the compose stack down, removing volumes.
+        if scenario_dir_str and Path(scenario_dir_str).exists():
+            try:
+                self._run_compose_in_dir(
+                    project_name,
+                    Path(scenario_dir_str),
+                    ["down", "-v"],
+                )
+            except Exception as exc:
+                # Log but continue — we still want to update DB status.
+                print(
+                    f"[STOP CHALLENGE] 'docker compose down' failed for challenge "
+                    f"{challenge_id} (project={project_name}): {exc}"
+                )
+        else:
+            print(
+                f"[STOP CHALLENGE] scenario_dir not found for challenge {challenge_id} "
+                f"(state={state}); skipping compose down."
+            )
+
+        # Release both port locks.
+        self._release_port_lock(challenge.current_port)  # VNC port
+        if web_port:
+            self._release_port_lock(web_port)
+
+        self._clear_state(challenge_id)
+
+        challenge.status = "stopped"
+        db.session.commit()
+        self._record_event(challenge_id, "challenge_stopped", {"status": "stopped"})
+        return challenge
+
+    def reset_challenge(self, challenge_id):
+        challenge = self.stop_challenge(challenge_id)
+        scenario = Scenario.query.get(challenge.scenario_id)
+        restarted = self.start_challenge(scenario.id, challenge.team_id)
+        self._record_event(restarted.id, "challenge_reset", {"from_challenge": challenge_id})
+        return restarted
+
+    # ------------------------------------------------------------------ MTD
 
     def spawn_honeypot(self, challenge_id):
         challenge = Challenge.query.get(challenge_id)
@@ -313,7 +375,6 @@ class DockerService:
             raise ValueError("Challenge not found")
 
         honeypot_port = min(challenge.current_port + 1, 65535) if challenge.current_port else None
-
         self._record_event(
             challenge.id,
             "honeypot_hit",
@@ -326,32 +387,45 @@ class DockerService:
         if not challenge:
             raise ValueError("Challenge not found")
 
-        project_name = str(challenge.id)
+        # Project name must match what was used when the stack was launched.
+        project_name = f"challenge_{challenge.id}"
         network_name = self._resolve_project_network(project_name)
         if not network_name:
             raise RuntimeError(f"No compose network found for challenge {challenge_id}")
 
-        victim_container = self._resolve_service_container(project_name, "victim")
+        victim_container = self._resolve_service_container(project_name, "target-web")
         if not victim_container:
-            raise RuntimeError(f"Victim container not found for challenge {challenge_id}")
+            raise RuntimeError(
+                f"'target-web' container not found for challenge {challenge_id}"
+            )
 
-        honeypot_container = self._resolve_service_container(project_name, "honeypot")
+        honeypot_container = self._resolve_service_container(project_name, "attacker-kali")
         if not honeypot_container:
-            raise RuntimeError(f"Honeypot container not found for challenge {challenge_id}")
+            raise RuntimeError(
+                f"'attacker-kali' container not found for challenge {challenge_id}"
+            )
 
         hop_tag = int(time.time())
-        victim_alias = f"victim-hop-{hop_tag}"
-        honeypot_alias = f"honeypot-hop-{hop_tag}"
-
-        self._run_docker(["network", "disconnect", network_name, victim_container], check=False)
-        self._run_docker(["network", "disconnect", network_name, honeypot_container], check=False)
-
         self._run_docker(
-            ["network", "connect", "--alias", "victim", "--alias", victim_alias, network_name, honeypot_container],
+            ["network", "disconnect", network_name, victim_container], check=False
+        )
+        self._run_docker(
+            ["network", "disconnect", network_name, honeypot_container], check=False
+        )
+        self._run_docker(
+            [
+                "network", "connect",
+                "--alias", "target-web", "--alias", f"target-web-hop-{hop_tag}",
+                network_name, honeypot_container,
+            ],
             check=True,
         )
         self._run_docker(
-            ["network", "connect", "--alias", "honeypot", "--alias", honeypot_alias, network_name, victim_container],
+            [
+                "network", "connect",
+                "--alias", "attacker-kali", "--alias", f"attacker-kali-hop-{hop_tag}",
+                network_name, victim_container,
+            ],
             check=True,
         )
 
@@ -363,9 +437,9 @@ class DockerService:
             "network": network_name,
             "victim_container": victim_container,
             "honeypot_container": honeypot_container,
-            "victim_new_ip": victim_new_ip,
             "honeypot_new_ip": honeypot_new_ip,
-            "message": "Swapped Victim and Honeypot IPs at the network layer",
+            "victim_new_ip": victim_new_ip,
+            "message": "Swapped target-web and attacker-kali IPs at the network layer",
         }
         self._record_event(challenge_id, "mtd_ip_hop", details)
         return details
@@ -387,39 +461,7 @@ class DockerService:
         self._record_event(challenge_id, "mtd_triggered", decision)
         return decision
 
-    def stop_challenge(self, challenge_id):
-        challenge = Challenge.query.get(challenge_id)
-        if not challenge:
-            raise ValueError("Challenge not found")
-
-        state = self._load_state(challenge_id) or {}
-        compose_file = Path(state.get("compose_file", str(self._compose_file(challenge_id))))
-
-        try:
-            if compose_file.exists():
-                self._run_compose(challenge_id, compose_file, ["down", "-v"])
-        except Exception:
-            pass
-
-        self._release_port_lock(challenge.current_port)
-
-        try:
-            compose_file.unlink(missing_ok=True)
-        except Exception:
-            pass
-        self._clear_state(challenge_id)
-
-        challenge.status = "stopped"
-        db.session.commit()
-        self._record_event(challenge_id, "challenge_stopped", {"status": "stopped"})
-        return challenge
-
-    def reset_challenge(self, challenge_id):
-        challenge = self.stop_challenge(challenge_id)
-        scenario = Scenario.query.get(challenge.scenario_id)
-        restarted = self.start_challenge(scenario.id, challenge.team_id)
-        self._record_event(restarted.id, "challenge_reset", {"from_challenge": challenge_id})
-        return restarted
+    # ------------------------------------------------------------------ events query
 
     def get_events(self, challenge_id, limit=100):
         return (
@@ -429,31 +471,31 @@ class DockerService:
             .all()
         )
 
+    # ------------------------------------------------------------------ background reaper
+
     def _start_reaper(self):
         def reaper_worker():
             while True:
-                time.sleep(60)  # ตื่นมาตรวจทุกๆ 1 นาที
+                time.sleep(60)
                 if not self.app:
                     continue
-                    
                 with self.app.app_context():
-                    # กำหนดเวลาหมดอายุ (15 นาที)
                     cutoff_time = datetime.utcnow() - timedelta(minutes=15)
-                    
-                    # ค้นหาโจทย์ที่ Active และเวลาเริ่มเก่ากว่า 15 นาที
-                    expired_challenges = Challenge.query.filter(
+                    expired = Challenge.query.filter(
                         Challenge.status == "active",
-                        Challenge.started_at <= cutoff_time
+                        Challenge.started_at <= cutoff_time,
                     ).all()
-                    
-                    for c in expired_challenges:
+                    for c in expired:
                         try:
-                            # สั่ง Terminate คอนเทนเนอร์ที่หมดอายุ
                             self.stop_challenge(c.id)
-                            print(f"[AUTO-TERMINATE] Killed expired Challenge ID: {c.id} (Exceeded 15 mins)")
-                        except Exception as e:
-                            print(f"[AUTO-TERMINATE] Error killing Challenge {c.id}: {e}")
+                            print(
+                                f"[AUTO-TERMINATE] Killed expired Challenge ID: {c.id} "
+                                f"(exceeded 15 min)"
+                            )
+                        except Exception as exc:
+                            print(
+                                f"[AUTO-TERMINATE] Error killing Challenge {c.id}: {exc}"
+                            )
 
-        # สั่งรันแบบ Background Thread (ถ้าระบบหลักปิด ยมทูตก็จะตายตามไปด้วย)
         reaper_thread = threading.Thread(target=reaper_worker, daemon=True)
         reaper_thread.start()

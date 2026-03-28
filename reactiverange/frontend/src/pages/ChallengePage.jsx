@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import apiClient from '../api/client';
 import EventLogFeed from '../components/EventLogFeed';
 import MtdStatusBadge from '../components/MtdStatusBadge';
@@ -25,23 +25,23 @@ export default function ChallengePage() {
     setStatusLoading(true);
     setError('');
     try {
-      const { data: statusData } = await apiClient.get('/api/challenge/status');
-      
-      if (Array.isArray(statusData)) {
-        const own = statusData.find((row) => row.team_id === user?.id && row.status === 'active');
-        setChallenge(own || null);
+      // Fetch both in parallel. The scenario list now carries a backend-computed
+      // `is_solved` flag per scenario so the frontend needs no solve logic at all.
+      const [{ data: statusData }, { data: scenarioData }] = await Promise.all([
+        apiClient.get('/api/challenge/status'),
+        apiClient.get('/api/scenario/list'),
+      ]);
 
-        const solved = statusData
-          .filter(row => row.status === 'solved' && row.team_id === user?.id)
-          .map(row => row.scenario_id);
-        setSolvedIds(solved);
-      } else {
-        setChallenge(null);
-        setSolvedIds([]);
-      }
+      // Active challenge: whichever of this user's instances is currently running.
+      const own = Array.isArray(statusData)
+        ? statusData.find(row => row.team_id === user?.id && row.status === 'active')
+        : null;
+      setChallenge(own || null);
 
-      const { data: scenarioData } = await apiClient.get('/api/scenario/list');
-      setScenarios(scenarioData || []);
+      // is_solved is authoritative from the backend — no client-side derivation.
+      const scenarios = scenarioData || [];
+      setScenarios(scenarios);
+      setSolvedIds(scenarios.filter(s => s.is_solved).map(s => s.id));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -299,7 +299,7 @@ export default function ChallengePage() {
                     <div className="space-y-6 animate-fadeIn">
                       <div className="bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-500/30 rounded-lg p-5">
                         <p className="text-sm text-gray-700 dark:text-slate-300 mb-3">
-                          The target system is running here: <a href={`http://localhost:${challenge.current_port || challenge.port}`} target="_blank" rel="noreferrer" className="text-green-600 dark:text-green-400 font-mono hover:underline font-bold text-lg block mt-1">http://localhost:{challenge.current_port || challenge.port}</a>
+                          The target system is running here: <a href={`https://localhost:${challenge.current_port || challenge.port}`} target="_blank" rel="noreferrer" className="text-green-600 dark:text-green-400 font-mono hover:underline font-bold text-lg block mt-1">http://localhost:{challenge.current_port || challenge.port}</a>
                         </p>
 
                         {/* UI นาฬิกานับถอยหลังใหม่ตรงนี้! */}
@@ -309,7 +309,7 @@ export default function ChallengePage() {
                         </p>
 
                         <a
-                          href={`http://localhost:${challenge.current_port || challenge.port}`}
+                          href={`https://${window.location.hostname}:${challenge.current_port || challenge.port}`}
                           target="_blank"
                           rel="noreferrer"
                           className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-indigo-500"

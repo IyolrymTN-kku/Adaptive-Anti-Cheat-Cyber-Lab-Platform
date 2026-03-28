@@ -51,6 +51,7 @@ def _migrate_add_columns(db):
     """Add new columns to existing tables when upgrading without Alembic."""
     migrations = [
         ("scenarios", "expected_time", "INTEGER NOT NULL DEFAULT 300"),
+        ("scenarios", "scenario_dir_path", "TEXT"),  # nullable — no NOT NULL constraint
     ]
     with db.engine.connect() as conn:
         for table, column, col_def in migrations:
