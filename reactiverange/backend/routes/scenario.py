@@ -33,13 +33,15 @@ def _write_scenario_files(scenario_dir: Path, payload: dict) -> None:
     (scenario_dir / "web" / "src").mkdir(parents=True, exist_ok=True)
 
     # Guard: remove any path that is mistakenly a directory so write_text() succeeds.
-    for file_path in [
+    candidate_files = [
         scenario_dir / "docker-compose.yml",
         scenario_dir / "db" / "Dockerfile",
         scenario_dir / "db" / "setup.sql",
         scenario_dir / "web" / "Dockerfile",
         scenario_dir / "web" / "src" / "index.php",
-    ]:
+        scenario_dir / "web" / "src" / "dashboard.php",
+    ]
+    for file_path in candidate_files:
         if file_path.is_dir():
             shutil.rmtree(file_path)
 
@@ -59,6 +61,11 @@ def _write_scenario_files(scenario_dir: Path, payload: dict) -> None:
     (scenario_dir / "web" / "src" / "index.php").write_text(
         payload["web_source_code"], encoding="utf-8"
     )
+    # Optional second page (e.g. dashboard.php for SQL-injection scenarios).
+    if payload.get("dashboard_source_code"):
+        (scenario_dir / "web" / "src" / "dashboard.php").write_text(
+            payload["dashboard_source_code"], encoding="utf-8"
+        )
 
 
 @scenario_bp.post("/generate")
@@ -124,6 +131,15 @@ def generate_scenario():
             f"[SCENARIO FILES] Warning: failed to write files for scenario {scenario.id}: {exc}"
         )
 
+    # --- Notify connected clients so the scenario list updates in real-time ---
+    try:
+        current_app.extensions["socketio"].emit(
+            "scenario_updated",
+            {"action": "created", "id": scenario.id},
+        )
+    except Exception as exc:
+        print(f"[SOCKETIO] Failed to emit scenario_updated (created): {exc}")
+
     # --- API response ---
     # Shape is IDENTICAL to the previous single-Dockerfile response so the
     # React frontend requires zero changes.
@@ -140,7 +156,9 @@ def generate_scenario():
                     "rule_json": payload["detection_rules"],
                     "challenge_description": payload["description"],
                     "expected_solution_path": payload["expected_solution"],
-                    "flag": payload["flag"],
+                    # Renamed from "flag" to "answer" in the API response for cleaner UX.
+                    # The internal DB column remains `flag` — no migration needed.
+                    "answer": payload["flag"],
                     "expected_time": scenario.expected_time,
                 },
             }
@@ -208,4 +226,14 @@ def delete_scenario(scenario_id):
 
     db.session.delete(scenario)
     db.session.commit()
+
+    # Notify connected clients so the scenario list updates in real-time.
+    try:
+        current_app.extensions["socketio"].emit(
+            "scenario_updated",
+            {"action": "deleted", "id": scenario_id},
+        )
+    except Exception as exc:
+        print(f"[SOCKETIO] Failed to emit scenario_updated (deleted): {exc}")
+
     return jsonify({"message": "Scenario deleted"}), 200

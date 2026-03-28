@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { io } from 'socket.io-client';
 import apiClient from '../api/client';
 import EventLogFeed from '../components/EventLogFeed';
 import MtdStatusBadge from '../components/MtdStatusBadge';
@@ -11,34 +12,38 @@ export default function ChallengePage() {
   const [solvedIds, setSolvedIds] = useState([]);
   const [statusLoading, setStatusLoading] = useState(true);
   const [error, setError] = useState('');
-  
+
   const [selectedScenario, setSelectedScenario] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [flagInput, setFlagInput] = useState('');
   const [submitStatus, setSubmitStatus] = useState(null);
   const [mtdNotice, setMtdNotice] = useState(null);
-  
-  //  State สำหรับเก็บเวลานับถอยหลัง
-  const [timeLeft, setTimeLeft] = useState('15:00');
+
+  // Countdown timer for active instance
+  const [timeLeft, setTimeLeft] = useState('--:--');
+
+  // 10-second launch cooldown to prevent duplicate container spawns
+  const [launchCooldown, setLaunchCooldown] = useState(0);
+
+  // Refs kept in sync on every render so stable [] socket effects can
+  // always read the latest values without stale closures.
+  const loadDataRef = useRef(null);
+  const userRef    = useRef(user);
 
   const loadData = async () => {
     setStatusLoading(true);
     setError('');
     try {
-      // Fetch both in parallel. The scenario list now carries a backend-computed
-      // `is_solved` flag per scenario so the frontend needs no solve logic at all.
       const [{ data: statusData }, { data: scenarioData }] = await Promise.all([
         apiClient.get('/api/challenge/status'),
         apiClient.get('/api/scenario/list'),
       ]);
 
-      // Active challenge: whichever of this user's instances is currently running.
       const own = Array.isArray(statusData)
         ? statusData.find(row => row.team_id === user?.id && row.status === 'active')
         : null;
       setChallenge(own || null);
 
-      // is_solved is authoritative from the backend — no client-side derivation.
       const scenarios = scenarioData || [];
       setScenarios(scenarios);
       setSolvedIds(scenarios.filter(s => s.is_solved).map(s => s.id));
@@ -49,47 +54,84 @@ export default function ChallengePage() {
     }
   };
 
+  // Keep refs in sync on every render so stable [] socket effects can
+  // always read the latest values without stale closures.
+  loadDataRef.current = loadData;
+  userRef.current     = user;
+
   useEffect(() => {
     if (!user) return;
     loadData();
   }, [user]);
 
-  //  --- ระบบ Countdown Timer 15 นาที --- 
+  // --- Real-time updates via Socket.IO ---
+  useEffect(() => {
+    const BACKEND_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    const socket = io(BACKEND_URL, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+    });
+
+    // An instructor created or deleted a scenario → refresh the list.
+    socket.on('scenario_updated', () => {
+      loadDataRef.current?.();
+    });
+
+    // An instructor reset this student's progress → clear all solved badges.
+    socket.on('student_reset', (payload) => {
+      if (payload?.student_id === userRef.current?.id) {
+        loadDataRef.current?.();
+      }
+    });
+
+    return () => {
+      socket.off('scenario_updated');
+      socket.off('student_reset');
+      socket.disconnect();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Connect once on mount; refs keep the handlers fresh.
+
+  // --- Countdown timer — derives end time from started_at + duration_minutes ---
   useEffect(() => {
     if (!challenge || challenge.status !== 'active') {
-      setTimeLeft('15:00');
+      setTimeLeft('--:--');
       return;
     }
 
-    // คำนวณเวลาหมดอายุ (15 นาทีจากตอนเริ่ม)
+    const durationMs = (challenge.duration_minutes || 15) * 60 * 1000;
     let endTime;
     if (challenge.started_at) {
-      // แปลงเวลาจาก Backend ให้เป็น UTC มาตรฐาน
-      const timeStr = challenge.started_at.endsWith('Z') ? challenge.started_at : challenge.started_at + 'Z';
-      endTime = new Date(timeStr).getTime() + 15 * 60 * 1000;
+      const timeStr = challenge.started_at.endsWith('Z')
+        ? challenge.started_at
+        : challenge.started_at + 'Z';
+      endTime = new Date(timeStr).getTime() + durationMs;
     } else {
-      // Fallback เผื่อ Backend ไม่ได้ส่งเวลามา
-      endTime = new Date().getTime() + 15 * 60 * 1000;
+      endTime = Date.now() + durationMs;
     }
 
-    const timer = setInterval(() => {
-      const now = new Date().getTime();
-      const distance = endTime - now;
-
+    const tick = () => {
+      const distance = endTime - Date.now();
       if (distance <= 0) {
-        clearInterval(timer);
         setTimeLeft('00:00');
-        // เมื่อเวลาหมด สามารถสั่ง loadData() รีเฟรชโจทย์ทิ้งได้เลย (ตัว Backend Reaper จะเคลียร์คอนเทนเนอร์ให้เอง)
-      } else {
-        const m = Math.floor(distance / (1000 * 60));
-        const s = Math.floor((distance % (1000 * 60)) / 1000);
-        setTimeLeft(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+        return;
       }
-    }, 1000);
+      const m = Math.floor(distance / 60000);
+      const s = Math.floor((distance % 60000) / 1000);
+      setTimeLeft(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+    };
 
+    tick(); // set immediately so there's no 1-second blank flash
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
   }, [challenge]);
-  // ------------------------------------------
+
+  // --- Launch cooldown ticker ---
+  useEffect(() => {
+    if (launchCooldown <= 0) return;
+    const timer = setTimeout(() => setLaunchCooldown(c => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [launchCooldown]);
 
   const openModal = (scenario) => {
     setSelectedScenario(scenario);
@@ -106,6 +148,9 @@ export default function ChallengePage() {
   };
 
   const startChallenge = async (scenarioId) => {
+    // Guard: reject duplicate clicks while cooldown is active
+    if (launchCooldown > 0) return;
+    setLaunchCooldown(10);
     try {
       setError('');
       await apiClient.post('/api/challenge/start', { scenario_id: scenarioId });
@@ -120,7 +165,7 @@ export default function ChallengePage() {
     try {
       await apiClient.post('/api/challenge/stop', { challenge_id: challenge.id });
       await loadData();
-      closeModal(); 
+      closeModal();
     } catch (err) {
       setError(err.message);
     }
@@ -132,18 +177,16 @@ export default function ChallengePage() {
     try {
       const { data } = await apiClient.post('/api/challenge/submit', {
         challenge_id: challenge.id,
-        flag: flagInput
+        answer: flagInput,
       });
       if (data.success) {
         setSubmitStatus({ type: 'success', msg: data.message });
-        setTimeout(() => {
-          loadData();
-        }, 2000);
+        setTimeout(() => { loadData(); }, 2000);
       } else {
         setSubmitStatus({ type: 'error', msg: data.message });
       }
     } catch (err) {
-      setSubmitStatus({ type: 'error', msg: err.message || "Submission failed" });
+      setSubmitStatus({ type: 'error', msg: err.message || 'Submission failed' });
     }
   };
 
@@ -155,7 +198,6 @@ export default function ChallengePage() {
         challenge_id: challenge.id,
         event_type: 'manual_trigger'
       });
-
       const honeypotIp = data?.honeypot_new_ip || 'unknown';
       setMtdNotice(`MTD Active! Traffic redirected to Honeypot IP: ${honeypotIp}`);
       setTimeout(() => setMtdNotice(null), 6000);
@@ -166,6 +208,10 @@ export default function ChallengePage() {
   };
 
   const isCurrentActive = challenge && selectedScenario && challenge.scenario_id === selectedScenario.id;
+
+  // Label for expected duration shown before launch
+  const difficultyDuration = (difficulty) =>
+    ({ easy: '15 min', medium: '30 min', hard: '60 min' }[difficulty] || '15 min');
 
   return (
     <div className="mx-auto mt-8 w-full max-w-7xl px-4 animate-fadeIn pb-12">
@@ -195,11 +241,11 @@ export default function ChallengePage() {
             const isSolved = solvedIds.includes(s.id);
 
             return (
-              <div 
-                key={s.id} 
+              <div
+                key={s.id}
                 onClick={() => openModal(s)}
                 className={`relative flex flex-col justify-between rounded-xl border p-5 cursor-pointer transition-all duration-200 hover:-translate-y-1 hover:shadow-lg ${
-                  isThisActive ? 'border-green-500 bg-green-50 dark:bg-slate-800 shadow-green-900/20' : 
+                  isThisActive ? 'border-green-500 bg-green-50 dark:bg-slate-800 shadow-green-900/20' :
                   isSolved ? 'border-blue-500/50 bg-blue-50/50 dark:bg-blue-900/10' :
                   'border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-800/60 hover:border-gray-300 dark:hover:border-slate-500 shadow-sm'
                 }`}
@@ -231,9 +277,9 @@ export default function ChallengePage() {
                   <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">{s.name}</h3>
                   <p className="text-xs text-gray-500 dark:text-slate-400 line-clamp-2">{s.description || 'No description provided.'}</p>
                 </div>
-                
+
                 <div className={`mt-4 border-t border-gray-100 dark:border-slate-700 pt-3 flex items-center justify-between text-xs font-semibold ${isSolved ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400 dark:text-slate-400'}`}>
-                  <span>{isSolved ? 'SOLVED' : 'Autor: AI-Generated'}</span>
+                  <span>{isSolved ? 'SOLVED' : 'Author: AI-Generated'}</span>
                   <span>{s.created_at ? new Date(s.created_at).toLocaleDateString() : 'N/A'}</span>
                 </div>
               </div>
@@ -249,7 +295,7 @@ export default function ChallengePage() {
         return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/70 backdrop-blur-sm p-4 animate-fadeIn">
           <div className="relative w-full max-w-4xl max-h-[90vh] overflow-y-auto rounded-2xl border border-gray-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-2xl">
-            
+
             <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-200 dark:border-slate-700 bg-white/95 dark:bg-slate-900/95 px-6 py-4 backdrop-blur">
               <h2 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-3">
                 {selectedScenario.name}
@@ -261,7 +307,7 @@ export default function ChallengePage() {
 
             <div className="p-6">
               <div className="grid gap-8 lg:grid-cols-[1fr_300px]">
-                
+
                 <div>
                   <h3 className="text-sm font-semibold text-gray-500 dark:text-slate-400 uppercase tracking-wider mb-2">Description</h3>
                   <div className="prose prose-slate dark:prose-invert max-w-none text-sm text-gray-700 dark:text-slate-300 mb-6 bg-gray-50 dark:bg-slate-800/50 p-4 rounded-lg border border-gray-100 dark:border-slate-700/50">
@@ -272,8 +318,8 @@ export default function ChallengePage() {
                     <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-500/30 rounded-lg p-8 text-center animate-fadeIn">
                       <div className="text-5xl mb-4">🏆</div>
                       <h3 className="text-2xl font-bold text-blue-700 dark:text-blue-400 mb-2">Challenge Solved!</h3>
-                      <p className="text-gray-600 dark:text-slate-300 mb-6">You have successfully captured the flag and earned your points.</p>
-                      <button 
+                      <p className="text-gray-600 dark:text-slate-300 mb-6">You have successfully submitted the correct answer and earned your points.</p>
+                      <button
                         onClick={closeModal}
                         className="px-8 py-2 rounded-lg font-bold text-white bg-blue-600 hover:bg-blue-500 shadow-lg transition-all"
                       >
@@ -282,55 +328,90 @@ export default function ChallengePage() {
                     </div>
                   ) : !isCurrentActive ? (
                     <div className="bg-gray-50 dark:bg-slate-800/50 border border-gray-200 dark:border-slate-700 rounded-lg p-6 text-center">
-                      <p className="text-sm text-gray-600 dark:text-slate-400 mb-4">This challenge launches an instance on demand.<br/>Its current status is: <span className="text-blue-500 dark:text-blue-400 font-mono">NOT_RUNNING</span></p>
-                      <button 
+                      <p className="text-sm text-gray-600 dark:text-slate-400 mb-1">
+                        This challenge launches an instance on demand.<br/>
+                        Its current status is: <span className="text-blue-500 dark:text-blue-400 font-mono">NOT_RUNNING</span>
+                      </p>
+                      <p className="text-xs text-gray-400 dark:text-slate-500 mb-4">
+                        Max instance time: <span className="font-semibold text-gray-600 dark:text-slate-300">{difficultyDuration(selectedScenario.difficulty)}</span>
+                      </p>
+                      <button
                         onClick={() => startChallenge(selectedScenario.id)}
-                        disabled={challenge !== null}
+                        disabled={challenge !== null || launchCooldown > 0}
                         className={`px-8 py-3 rounded-lg font-bold text-white shadow-lg transition-all ${
-                          challenge !== null 
-                          ? 'bg-gray-400 dark:bg-slate-600 cursor-not-allowed opacity-50' 
+                          challenge !== null
+                          ? 'bg-gray-400 dark:bg-slate-600 cursor-not-allowed opacity-50'
+                          : launchCooldown > 0
+                          ? 'bg-amber-500 dark:bg-amber-600 cursor-not-allowed'
                           : 'bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/25 active:scale-95'
                         }`}
                       >
-                        {challenge !== null ? 'Another Instance is Running' : 'Launch Instance'}
+                        {challenge !== null
+                          ? 'Another Instance is Running'
+                          : launchCooldown > 0
+                          ? `Ready in ${launchCooldown}s...`
+                          : 'Launch Instance'}
                       </button>
                     </div>
                   ) : (
-                    <div className="space-y-6 animate-fadeIn">
+                    <div className="space-y-4 animate-fadeIn">
                       <div className="bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-500/30 rounded-lg p-5">
-                        <p className="text-sm text-gray-700 dark:text-slate-300 mb-3">
-                          The target system is running here: <a href={`https://localhost:${challenge.current_port || challenge.port}`} target="_blank" rel="noreferrer" className="text-green-600 dark:text-green-400 font-mono hover:underline font-bold text-lg block mt-1">http://localhost:{challenge.current_port || challenge.port}</a>
+
+                        {/* Target system URL — accessible from inside the Kali browser */}
+                        <p className="text-xs font-semibold text-gray-500 dark:text-slate-400 uppercase tracking-wider mb-1">
+                          Target system (open inside Kali browser)
+                        </p>
+                        <p className="font-mono text-green-600 dark:text-green-400 font-bold text-lg mb-4">
+                          http://target-web
                         </p>
 
-                        {/* UI นาฬิกานับถอยหลังใหม่ตรงนี้! */}
+                        {/* Instance time remaining */}
                         <p className="text-xs text-amber-600 dark:text-amber-400/80 mb-4 flex items-center gap-2">
                           <span className="inline-block w-2 h-2 rounded-full bg-amber-500 dark:bg-amber-400 animate-pulse"></span>
-                          Instance Time Remaining: <span className="font-mono font-bold text-sm text-amber-500">{timeLeft}</span>
+                          Instance Time Remaining:&nbsp;
+                          <span className="font-mono font-bold text-sm text-amber-500">{timeLeft}</span>
                         </p>
 
-                        <a
-                          href={`https://${window.location.hostname}:${challenge.current_port || challenge.port}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-indigo-500"
-                        >
-                          💻 Open Kali Linux Console
-                        </a>
+                        {/* Kali Linux credentials */}
+                        <div className="mb-4 p-3 rounded-lg bg-gray-100 dark:bg-slate-700/60 border border-gray-200 dark:border-slate-600">
+                          <p className="text-xs font-semibold text-gray-600 dark:text-slate-300 mb-2 uppercase tracking-wider">Kali Linux Credentials</p>
+                          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                            <span className="text-gray-500 dark:text-slate-400">
+                              Username:&nbsp;
+                              <code className="font-mono font-bold text-green-600 dark:text-green-400">kasm_user</code>
+                            </span>
+                            <span className="text-gray-500 dark:text-slate-400">
+                              Password:&nbsp;
+                              <code className="font-mono font-bold text-green-600 dark:text-green-400">password</code>
+                            </span>
+                          </div>
+                        </div>
 
-                        {user?.role === 'instructor' && (
-                          <button
-                            type="button"
-                            onClick={triggerManualMtd}
-                            className="ml-3 inline-flex items-center justify-center rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-emerald-500"
+                        <div className="flex flex-wrap gap-3">
+                          <a
+                            href={`https://${window.location.hostname}:${challenge.current_port || challenge.port}/?password=password`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center justify-center rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-indigo-500"
                           >
-                            🛡️ Trigger MTD (IP Hopping)
-                          </button>
-                        )}
+                            💻 Open Kali Linux Console
+                          </a>
 
-                        <div className="pt-2">
-                            <button onClick={stopChallenge} className="text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 text-sm font-semibold transition underline">
-                              Terminate Instance
+                          {user?.role === 'instructor' && (
+                            <button
+                              type="button"
+                              onClick={triggerManualMtd}
+                              className="inline-flex items-center justify-center rounded-lg bg-emerald-600 px-5 py-2.5 text-sm font-bold text-white shadow-lg transition hover:bg-emerald-500"
+                            >
+                              🛡️ Trigger MTD (IP Hopping)
                             </button>
+                          )}
+                        </div>
+
+                        <div className="pt-3">
+                          <button onClick={stopChallenge} className="text-red-500 hover:text-red-600 dark:text-red-400 dark:hover:text-red-300 text-sm font-semibold transition underline">
+                            Terminate Instance
+                          </button>
                         </div>
                       </div>
                       {error && <p className="text-sm text-red-500 dark:text-red-400">{error}</p>}
@@ -339,31 +420,31 @@ export default function ChallengePage() {
 
                   {isCurrentActive && (
                     <div className="mt-8">
-                        <div className="flex gap-3">
-                          <input 
-                            type="text" 
-                            value={flagInput}
-                            onChange={(e) => setFlagInput(e.target.value)}
-                            placeholder="FLAG{...}" 
-                            className="flex-1 rounded-lg border border-gray-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-4 py-2 text-gray-900 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                          />
-                          <button 
-                            onClick={submitFlag}
-                            className="rounded-lg bg-blue-600 px-6 py-2 font-bold text-white hover:bg-blue-500 transition"
-                          >
-                            Submit Flag
-                          </button>
+                      <div className="flex gap-3">
+                        <input
+                          type="text"
+                          value={flagInput}
+                          onChange={(e) => setFlagInput(e.target.value)}
+                          placeholder="Enter your answer here..."
+                          className="flex-1 rounded-lg border border-gray-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-4 py-2 text-gray-900 dark:text-white focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                        />
+                        <button
+                          onClick={submitFlag}
+                          className="rounded-lg bg-blue-600 px-6 py-2 font-bold text-white hover:bg-blue-500 transition"
+                        >
+                          Submit Answer
+                        </button>
+                      </div>
+                      {submitStatus && (
+                        <div className={`mt-3 p-3 rounded-md text-sm font-medium animate-fadeIn ${
+                          submitStatus.type === 'success'
+                          ? 'bg-green-100 text-green-800 dark:bg-green-500/20 dark:text-green-400 border border-green-200 dark:border-green-500/30'
+                          : 'bg-red-100 text-red-800 dark:bg-red-500/20 dark:text-red-400 border border-red-200 dark:border-red-500/30'
+                        }`}>
+                          {submitStatus.type === 'success' ? '🎉 ' : '❌ '}
+                          {submitStatus.msg}
                         </div>
-                        {submitStatus && (
-                          <div className={`mt-3 p-3 rounded-md text-sm font-medium animate-fadeIn ${
-                            submitStatus.type === 'success' 
-                            ? 'bg-green-100 text-green-800 dark:bg-green-500/20 dark:text-green-400 border border-green-200 dark:border-green-500/30' 
-                            : 'bg-red-100 text-red-800 dark:bg-red-500/20 dark:text-red-400 border border-red-200 dark:border-red-500/30'
-                          }`}>
-                            {submitStatus.type === 'success' ? '🎉 ' : '❌ '}
-                            {submitStatus.msg}
-                          </div>
-                        )}
+                      )}
                     </div>
                   )}
                 </div>

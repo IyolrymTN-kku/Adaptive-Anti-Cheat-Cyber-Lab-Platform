@@ -474,24 +474,33 @@ class DockerService:
     # ------------------------------------------------------------------ background reaper
 
     def _start_reaper(self):
+        # Duration limits by difficulty — must match challenge.py's _DURATION_MAP.
+        _DURATION_MAP = {"easy": 15, "medium": 30, "hard": 60}
+
         def reaper_worker():
             while True:
                 time.sleep(60)
                 if not self.app:
                     continue
                 with self.app.app_context():
-                    cutoff_time = datetime.utcnow() - timedelta(minutes=15)
-                    expired = Challenge.query.filter(
-                        Challenge.status == "active",
-                        Challenge.started_at <= cutoff_time,
-                    ).all()
-                    for c in expired:
+                    now = datetime.utcnow()
+                    active = Challenge.query.filter_by(status="active").all()
+                    for c in active:
+                        if not c.started_at:
+                            continue
                         try:
-                            self.stop_challenge(c.id)
-                            print(
-                                f"[AUTO-TERMINATE] Killed expired Challenge ID: {c.id} "
-                                f"(exceeded 15 min)"
-                            )
+                            scenario = Scenario.query.get(c.scenario_id)
+                            duration_min = _DURATION_MAP.get(
+                                getattr(scenario, "difficulty", "easy"), 15
+                            ) if scenario else 15
+                            elapsed = (now - c.started_at).total_seconds()
+                            if elapsed >= duration_min * 60:
+                                self.stop_challenge(c.id)
+                                print(
+                                    f"[AUTO-TERMINATE] Killed expired Challenge ID: {c.id} "
+                                    f"(difficulty={getattr(scenario, 'difficulty', 'unknown')}, "
+                                    f"limit={duration_min} min)"
+                                )
                         except Exception as exc:
                             print(
                                 f"[AUTO-TERMINATE] Error killing Challenge {c.id}: {exc}"
