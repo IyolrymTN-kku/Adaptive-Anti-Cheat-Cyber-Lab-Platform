@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 import os
 
 from dotenv import load_dotenv
@@ -10,7 +13,7 @@ import jwt
 
 from config import Config
 from models import User, db
-from routes import auth_bp, challenge_bp, events_bp, scenario_bp, scoreboard_bp
+from routes import admin_bp, auth_bp, challenge_bp, events_bp, scenario_bp, scoreboard_bp
 from services.docker_service import DockerService
 from services.gemini_service import GeminiService
 from services.mail_service import MailService
@@ -18,7 +21,7 @@ from services.mail_service import MailService
 
 mail = Mail()
 login_manager = LoginManager()
-socketio = SocketIO(cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(cors_allowed_origins="*", async_mode="eventlet")
 
 
 @login_manager.user_loader
@@ -51,6 +54,7 @@ def _migrate_add_columns(db):
     """Add new columns to existing tables when upgrading without Alembic."""
     migrations = [
         ("scenarios", "expected_time", "INTEGER NOT NULL DEFAULT 300"),
+        ("scenarios", "scenario_dir_path", "TEXT"),  # nullable — no NOT NULL constraint
     ]
     with db.engine.connect() as conn:
         for table, column, col_def in migrations:
@@ -79,10 +83,15 @@ def create_app():
         db.create_all()
         _migrate_add_columns(db)
 
+        # Store socketio so blueprints can emit events via current_app.extensions["socketio"]
+        # without creating a circular import (app → routes → app).
+        app.extensions["socketio"] = socketio
+
         app.extensions["mail_service"] = MailService(mail)
         app.extensions["gemini_service"] = GeminiService(app.config["GEMINI_API_KEY"])
         app.extensions["docker_service"] = DockerService(socketio=socketio, app=app)
 
+    app.register_blueprint(admin_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(challenge_bp)
     app.register_blueprint(scenario_bp)
@@ -102,4 +111,4 @@ app = create_app()
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     print(f"🚀 ReactiveRange Backend is running on http://127.0.0.1:{port}")
-    socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
+    socketio.run(app, host="0.0.0.0", port=port)

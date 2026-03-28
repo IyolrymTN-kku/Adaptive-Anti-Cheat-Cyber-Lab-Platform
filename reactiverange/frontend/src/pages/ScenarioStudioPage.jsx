@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import apiClient from '../api/client';
 
@@ -70,8 +70,6 @@ export default function ScenarioStudioPage() {
       setDeploying(false);
     }
   };
-
-  const jsonRules = useMemo(() => JSON.stringify(preview?.rule_json || [], null, 2), [preview]);
 
   return (
     <div className="mx-auto mt-8 w-full max-w-7xl px-4 animate-fadeIn">
@@ -167,15 +165,12 @@ export default function ScenarioStudioPage() {
             <div className="mt-4 space-y-4">
               <p className="text-sm text-slate-300 dark:text-slate-300 text-slate-600">{preview.challenge_description}</p>
               <div className="rounded-md border border-green-500/20 bg-black/40 p-3 font-mono text-xs text-green-300">
-                <div className="mb-1 text-green-500">Dockerfile</div>
+                <div className="mb-1 text-green-500">docker-compose.yml</div>
                 <pre className="overflow-x-auto whitespace-pre-wrap">{preview.dockerfile_content}</pre>
               </div>
-              <div className="rounded-md border border-blue-500/20 bg-black/30 p-3 font-mono text-xs text-blue-300">
-                <div className="mb-1 text-blue-400">Detection Rules</div>
-                <pre className="overflow-x-auto">{jsonRules}</pre>
-              </div>
               <div className="rounded-md border border-amber-500/20 bg-black/30 p-3 text-xs text-amber-300">
-                Flag: <span className="font-mono">{preview.flag}</span>
+                <span className="text-amber-400 font-semibold">Answer (for instructor reference):</span>{' '}
+                <span className="font-mono">{preview.answer}</span>
               </div>
             </div>
           ) : (

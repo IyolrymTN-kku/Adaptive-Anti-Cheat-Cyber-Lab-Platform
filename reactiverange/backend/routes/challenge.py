@@ -5,8 +5,15 @@ from models import Challenge, Scenario, User
 from services.scoring_service import ScoringService
 
 
-
 challenge_bp = Blueprint("challenge", __name__, url_prefix="/api/challenge")
+
+# Instance duration by scenario difficulty (minutes).
+_DURATION_MAP = {"easy": 15, "medium": 30, "hard": 60}
+
+
+def _duration_for(scenario):
+    """Return the instance duration in minutes for the given Scenario object."""
+    return _DURATION_MAP.get(getattr(scenario, "difficulty", "easy"), 15)
 
 
 @challenge_bp.post("/start")
@@ -19,17 +26,35 @@ def start_challenge():
     if not scenario:
         return jsonify({"error": "Scenario not found"}), 404
 
+    # Scenarios generated before the multi-container refactor won't have files on disk.
+    if not scenario.scenario_dir_path:
+        return jsonify({
+            "error": (
+                "This scenario was generated before the multi-container upgrade. "
+                "Please ask an instructor to regenerate it."
+            )
+        }), 422
+
     docker_service = current_app.extensions["docker_service"]
+    try:
+        challenge = docker_service.start_challenge(scenario_id, current_user.id)
+    except ValueError as exc:
+        # Configuration problems (missing dir, missing compose file, etc.)
+        return jsonify({"error": str(exc)}), 422
+    except RuntimeError as exc:
+        # Docker/subprocess failures
+        return jsonify({"error": f"Failed to launch instance: {exc}"}), 500
 
-    challenge = docker_service.start_challenge(scenario_id, current_user.id)
-
+    scenario = Scenario.query.get(scenario_id)
     return (
         jsonify(
             {
                 "id": challenge.id,
                 "status": challenge.status,
+                # current_port = VNC port — used by "Open Kali Linux Console" button
                 "port": challenge.current_port,
                 "container_id": challenge.container_id,
+                "duration_minutes": _duration_for(scenario),
             }
         ),
         201,
@@ -75,6 +100,7 @@ def status_challenge():
             return jsonify({"error": "Challenge not found"}), 404
         if current_user.role != "instructor" and challenge.team_id != current_user.id:
             return jsonify({"error": "Forbidden"}), 403
+        scenario = Scenario.query.get(challenge.scenario_id)
         return (
             jsonify(
                 {
@@ -84,15 +110,25 @@ def status_challenge():
                     "scenario_id": challenge.scenario_id,
                     "team_id": challenge.team_id,
                     "started_at": challenge.started_at.isoformat() if challenge.started_at else None,
+                    "duration_minutes": _duration_for(scenario),
                 }
             ),
             200,
         )
 
-    # คืนค่าโจทย์กลับไปให้ Frontend แสดงผล
+    # Return all challenges for this user (instructors see everyone's).
     query = Challenge.query
     if current_user.role != "instructor":
         query = query.filter_by(team_id=current_user.id)
+
+    challenges = query.order_by(Challenge.id.desc()).all()
+
+    # Bulk-load scenarios to avoid N+1 queries.
+    scenario_ids = list({c.scenario_id for c in challenges})
+    scenarios_by_id = (
+        {s.id: s for s in Scenario.query.filter(Scenario.id.in_(scenario_ids)).all()}
+        if scenario_ids else {}
+    )
 
     results = [
         {
@@ -102,8 +138,9 @@ def status_challenge():
             "scenario_id": c.scenario_id,
             "team_id": c.team_id,
             "started_at": c.started_at.isoformat() if c.started_at else None,
+            "duration_minutes": _duration_for(scenarios_by_id.get(c.scenario_id)),
         }
-        for c in query.order_by(Challenge.id.desc()).all()
+        for c in challenges
     ]
     return jsonify(results), 200
 
@@ -172,7 +209,8 @@ def submit_flag():
 
     data = request.get_json(force=True)
     challenge_id = data.get("challenge_id")
-    submitted_flag = data.get("flag", "").strip()
+    # Accept "answer" (new terminology) with "flag" as a fallback for any old clients.
+    submitted_flag = (data.get("answer") or data.get("flag", "")).strip()
 
     challenge = Challenge.query.get(challenge_id)
     if not challenge:
@@ -226,6 +264,6 @@ def submit_flag():
         challenge.status = "solved"
         db.session.commit()
 
-        return jsonify({"success": True, "message": f"Correct Flag! +{round(score_entry.net_score)} Points!"}), 200
+        return jsonify({"success": True, "message": f"Correct Answer! +{round(score_entry.net_score)} Points!"}), 200
     else:
-        return jsonify({"success": False, "message": "Incorrect Flag. Keep trying!"}), 200
+        return jsonify({"success": False, "message": "Incorrect Answer, please try again."}), 200
