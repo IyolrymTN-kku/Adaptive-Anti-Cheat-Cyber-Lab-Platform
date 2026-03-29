@@ -190,12 +190,14 @@ def trigger_mtd():
     docker_service = current_app.extensions["docker_service"]
     decision = docker_service.trigger_mtd(challenge_id, event_type=event_type)
 
+    penalty_mult = decision.get("penalty_multiplier", 1.0)
+
     scorer = ScoringService()
     scorer.update_score(
         user_id=current_user.id,
         challenge_id=challenge.id,
         base_delta=15,
-        deception_penalty_delta=max(0, (decision["penalty_multiplier"] - 1.0) * 10),
+        deception_penalty_delta=max(0, (penalty_mult - 1.0) * 10),
         mtd_evasions_delta=1,
     )
 
